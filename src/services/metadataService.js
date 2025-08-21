@@ -248,7 +248,10 @@ class MetadataService {
         const movie = data.results[0];
         return {
           success: true,
+          id: movie.id,
           title: movie.title,
+          name: movie.title,
+          release_date: movie.release_date,
           year: movie.release_date ? new Date(movie.release_date).getFullYear() : null,
           overview: movie.overview,
           confidence: this.calculateConfidence(title, movie.title, year, movie.release_date),
@@ -300,7 +303,10 @@ class MetadataService {
 
         return {
           success: true,
+          id: show.id,
+          name: show.name,
           title: show.name,
+          first_air_date: show.first_air_date,
           year: show.first_air_date ? new Date(show.first_air_date).getFullYear() : null,
           season,
           episode,
@@ -430,15 +436,17 @@ class MetadataService {
         .replace(/{t}/g, this.sanitizeFileName(metadata.episodeTitle || 'Unknown Episode'))
         .replace(/{y}/g, metadata.year || 'Unknown');
 
-      // For TV shows, organize into season folders
+      // For TV shows, organize into series/season folder hierarchy
       cleanName = this.sanitizeFileName(cleanName);
       const ext = originalExtension.startsWith('.') ? originalExtension : `.${originalExtension}`;
+      const seriesName = this.sanitizeFileName(metadata.title || 'Unknown Show');
       const seasonFolder = `Season ${metadata.season || 1}`;
       
       return {
         filename: cleanName + ext,
         needsDirectoryCreation: true,
         seasonFolder: seasonFolder,
+        seriesFolder: seriesName,
         season: metadata.season || 1
       };
     }
@@ -451,6 +459,102 @@ class MetadataService {
       needsDirectoryCreation: false,
       seasonFolder: null
     };
+  }
+
+  // Generic search function that routes to appropriate service
+  async searchMedia(title, type, year) {
+    // Load API keys from file storage or localStorage fallback
+    try {
+      let settings = null;
+      
+      // Try file-based storage first (Electron)
+      if (window.electronAPI && window.electronAPI.loadSettings) {
+        const result = await window.electronAPI.loadSettings();
+        if (result.success && result.settings) {
+          settings = result.settings;
+        }
+      } else {
+        // Fallback to localStorage
+        const settingsString = localStorage.getItem('mediabot-settings');
+        if (settingsString) {
+          settings = JSON.parse(settingsString);
+        }
+      }
+      
+      if (settings && settings.apiKeys) {
+        this.setApiKeys(settings.apiKeys);
+        console.log('API keys loaded successfully');
+      } else {
+        console.warn('No API keys found in settings');
+      }
+    } catch (error) {
+      console.warn('Could not load API keys:', error);
+    }
+
+    if (type === 'movie') {
+      const result = await this.searchMovie(title, year);
+      return {
+        success: result.success,
+        results: result.success ? [result] : [],
+        source: result.source
+      };
+    } else if (type === 'tv') {
+      const result = await this.searchTVShow(title);
+      return {
+        success: result.success,
+        results: result.success ? [result] : [],
+        source: result.source
+      };
+    }
+
+    return {
+      success: false,
+      error: 'Unknown media type',
+      results: []
+    };
+  }
+
+  // Get episode details for a TV show
+  async getEpisodeDetails(showId, season, episode) {
+    try {
+      const apiKey = this.apiKeys.themoviedb;
+      if (!apiKey) {
+        throw new Error('TheMovieDB API key not configured');
+      }
+
+      const episodeUrl = `https://api.themoviedb.org/3/tv/${showId}/season/${season}/episode/${episode}?api_key=${apiKey}`;
+      
+      const response = await fetch(episodeUrl);
+      if (!response.ok) {
+        if (response.status === 404) {
+          return {
+            success: false,
+            error: `Episode S${season}E${episode} not found`
+          };
+        }
+        throw new Error(`API request failed: ${response.status}`);
+      }
+
+      const episodeData = await response.json();
+      
+      return {
+        success: true,
+        episode: {
+          name: episodeData.name,
+          title: episodeData.name,
+          overview: episodeData.overview,
+          air_date: episodeData.air_date,
+          episode_number: episodeData.episode_number,
+          season_number: episodeData.season_number
+        }
+      };
+    } catch (error) {
+      console.error('Episode details error:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
   }
 }
 

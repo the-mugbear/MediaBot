@@ -100,6 +100,10 @@ config/local.json
 config/development.json
 config/production.json
 
+# MediaBot settings with API keys (file-based storage)
+mediabot-settings.json
+**/mediabot-settings.json
+
 # API keys and sensitive data
 config/keys.json
 config/secrets.json
@@ -117,6 +121,9 @@ config/secrets.json
 *.backup
 *.bak
 *.old
+
+# MediaBot metadata staging files
+*.metadata.json
 
 # Test media files
 test-files/

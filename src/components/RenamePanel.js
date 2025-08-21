@@ -12,12 +12,27 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     loadApiKeys();
   }, []);
 
-  const loadApiKeys = () => {
+  const loadApiKeys = async () => {
     try {
-      const savedSettings = localStorage.getItem('mediabot-settings');
-      if (savedSettings) {
-        const settings = JSON.parse(savedSettings);
-        metadataService.setApiKeys(settings.apiKeys || {});
+      let settings = null;
+      
+      // Try file-based storage first (Electron)
+      if (window.electronAPI && window.electronAPI.loadSettings) {
+        const result = await window.electronAPI.loadSettings();
+        if (result.success && result.settings) {
+          settings = result.settings;
+        }
+      } else {
+        // Fallback to localStorage
+        const savedSettings = localStorage.getItem('mediabot-settings');
+        if (savedSettings) {
+          settings = JSON.parse(savedSettings);
+        }
+      }
+      
+      if (settings && settings.apiKeys) {
+        metadataService.setApiKeys(settings.apiKeys);
+        console.log('API keys loaded in RenamePanel');
       }
     } catch (error) {
       console.error('Failed to load API keys:', error);
@@ -97,6 +112,28 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         
         console.log(`Generated filename info for ${file.name}:`, filenameInfo);
         
+        // Determine parent folder changes
+        const currentDirectory = file.path.substring(0, file.path.lastIndexOf('/'));
+        const currentParentName = currentDirectory.split('/').pop();
+        let parentFolderChange = null;
+        
+        if (filenameInfo.seriesFolder) {
+          // Check if we're moving from a release folder to a clean series folder
+          const isFromReleaseFolder = currentParentName.includes('.') || 
+                                     currentParentName.includes('[') || 
+                                     currentParentName.includes('S01') ||
+                                     currentParentName.length > 50; // Long folder names are usually release names
+          
+          if (isFromReleaseFolder || currentParentName !== filenameInfo.seriesFolder) {
+            parentFolderChange = {
+              from: currentParentName,
+              to: filenameInfo.seriesFolder,
+              type: 'series',
+              isCleanup: isFromReleaseFolder
+            };
+          }
+        }
+        
         previews.push({
           id: file.id,
           originalName: file.name,
@@ -104,8 +141,10 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           confidence: metadata.confidence || 0.5,
           metadata: metadata,
           seasonFolder: filenameInfo.seasonFolder,
+          seriesFolder: filenameInfo.seriesFolder,
           needsDirectoryCreation: filenameInfo.needsDirectoryCreation,
           season: filenameInfo.season,
+          parentFolderChange: parentFolderChange,
           matches: lookupResult && lookupResult.success ? [
             { 
               source: metadata.source || 'Unknown', 
@@ -180,17 +219,30 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     let createBackup = false;
     let writeMetadata = true; // Default to true
     try {
-      const savedSettings = localStorage.getItem('mediabot-settings');
-      console.log('Raw settings from localStorage:', savedSettings);
-      if (savedSettings) {
-        const settings = JSON.parse(savedSettings);
-        console.log('Parsed settings:', settings);
+      let settings = null;
+      
+      // Try file-based storage first (Electron)
+      if (window.electronAPI && window.electronAPI.loadSettings) {
+        const result = await window.electronAPI.loadSettings();
+        if (result.success && result.settings) {
+          settings = result.settings;
+        }
+      } else {
+        // Fallback to localStorage
+        const savedSettings = localStorage.getItem('mediabot-settings');
+        if (savedSettings) {
+          settings = JSON.parse(savedSettings);
+        }
+      }
+      
+      if (settings) {
+        console.log('Loaded settings:', settings);
         createBackup = settings.preferences?.createBackup === true;
         writeMetadata = settings.preferences?.writeMetadata !== false; // Default to true unless explicitly disabled
         console.log('Create backup setting:', createBackup);
         console.log('Write metadata setting:', writeMetadata);
       } else {
-        console.log('No settings found in localStorage, using defaults (backup: false, metadata: true)');
+        console.log('No settings found, using defaults (backup: false, metadata: true)');
       }
     } catch (error) {
       console.warn('Failed to load settings:', error);
@@ -249,8 +301,13 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           }
           
           if (result.needsDirectoryCreation && result.seasonFolder) {
-            // TV show - place in season folder
-            newPath = window.nodeAPI.path.join(baseDirectory, result.seasonFolder, result.newName);
+            // TV show - place in series/season folder structure
+            if (result.seriesFolder) {
+              newPath = window.nodeAPI.path.join(baseDirectory, result.seriesFolder, result.seasonFolder, result.newName);
+            } else {
+              // Fallback to just season folder if no series folder
+              newPath = window.nodeAPI.path.join(baseDirectory, result.seasonFolder, result.newName);
+            }
           } else {
             // Movie or no season folder needed
             newPath = window.nodeAPI.path.join(baseDirectory, result.newName);
@@ -274,7 +331,13 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           }
           
           if (result.needsDirectoryCreation && result.seasonFolder) {
-            newPath = `${baseDirectory}/${result.seasonFolder}/${result.newName}`;
+            // TV show - place in series/season folder structure
+            if (result.seriesFolder) {
+              newPath = `${baseDirectory}/${result.seriesFolder}/${result.seasonFolder}/${result.newName}`;
+            } else {
+              // Fallback to just season folder if no series folder
+              newPath = `${baseDirectory}/${result.seasonFolder}/${result.newName}`;
+            }
           } else {
             newPath = `${baseDirectory}/${result.newName}`;
           }
@@ -288,7 +351,8 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           newPath: newPath,
           createBackup: false, // Force no backup for now - will fix settings loading later
           needsDirectoryCreation: result.needsDirectoryCreation,
-          seasonFolder: result.seasonFolder
+          seasonFolder: result.seasonFolder,
+          seriesFolder: result.seriesFolder
         };
       });
 
@@ -301,39 +365,31 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           newPath: op.newPath,
           createBackup: op.createBackup,
           needsDirectoryCreation: op.needsDirectoryCreation,
-          seasonFolder: op.seasonFolder
+          seasonFolder: op.seasonFolder,
+          seriesFolder: op.seriesFolder
         });
       });
       
-      // Execute the rename operations
-      const renameResult = await window.electronAPI.renameFiles(renameOperations);
+      // Prepare operations with metadata for the new efficient workflow
+      const organizeOperations = renameOperations.map(op => ({
+        ...op,
+        metadata: writeMetadata ? results.find(r => r.id === op.id)?.metadata : null,
+        cleanupSource: true
+      }));
       
-      if (renameResult.success) {
-        console.log('Rename results:', renameResult.results);
+      // Execute the complete organization workflow
+      const organizeResult = await window.electronAPI.organizeFiles(organizeOperations);
+      
+      if (organizeResult.success) {
+        console.log('Organization results:', organizeResult.results);
+        console.log('Organization summary:', organizeResult.summary);
         
         // Check results and update file list
-        const successful = renameResult.results.filter(r => r.success);
-        const failed = renameResult.results.filter(r => !r.success);
+        const successful = organizeResult.results.filter(r => r.success);
+        const failed = organizeResult.results.filter(r => !r.success);
         
         if (successful.length > 0) {
-          // Write metadata to successfully renamed files if enabled
-          if (writeMetadata) {
-            console.log('Writing metadata to renamed files...');
-            for (const successfulRename of successful) {
-              try {
-                // Find the corresponding result with metadata
-                const resultData = results.find(r => r.id === successfulRename.id);
-                if (resultData && resultData.metadata) {
-                  console.log(`Writing metadata for: ${successfulRename.newPath}`);
-                  await metadataWriter.writeMetadata(successfulRename.newPath, resultData.metadata);
-                  console.log(`Metadata written successfully for: ${successfulRename.newPath}`);
-                }
-              } catch (error) {
-                console.warn(`Failed to write metadata for ${successfulRename.newPath}:`, error);
-                // Don't fail the entire operation for metadata errors
-              }
-            }
-          }
+          // Metadata is now handled automatically in the organize workflow
 
           // Update the files in the main app state
           const updatedFiles = files.map(file => {
@@ -363,8 +419,9 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         
         // Show results to user
         if (failed.length === 0) {
-          const metadataMsg = writeMetadata ? ' and wrote metadata' : '';
-          alert(`Successfully renamed ${successful.length} file(s)${metadataMsg}!`);
+          const metadataCount = organizeResult.summary.metadataWritten;
+          const metadataMsg = writeMetadata && metadataCount > 0 ? ` and wrote metadata to ${metadataCount} files` : '';
+          alert(`Successfully organized ${successful.length} file(s)${metadataMsg}!`);
         } else {
           // Extract basename safely for error messages
           const failedMessages = failed.map(f => {
@@ -491,6 +548,26 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
                   <div className="arrow">→</div>
                   <div className="new">
                     <strong>New:</strong> {result.newName}
+                    {result.seriesFolder && result.seasonFolder && (
+                      <div className="folder-structure">
+                        <small>📁 {result.seriesFolder}/{result.seasonFolder}/</small>
+                      </div>
+                    )}
+                    {result.seasonFolder && !result.seriesFolder && (
+                      <div className="folder-structure">
+                        <small>📁 {result.seasonFolder}/</small>
+                      </div>
+                    )}
+                    {result.parentFolderChange && (
+                      <div className="parent-folder-change">
+                        <small>
+                          {result.parentFolderChange.isCleanup ? '🧹' : '📂'} Parent folder: 
+                          <span className="folder-from">{result.parentFolderChange.from}</span> → 
+                          <span className="folder-to">{result.parentFolderChange.to}</span>
+                          {result.parentFolderChange.isCleanup && <span className="cleanup-note"> (cleanup release folder)</span>}
+                        </small>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="result-confidence">

@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import MetadataDisplay from './MetadataDisplay';
+import apiMetadataService from '../services/apiMetadataService';
 
 const FileList = ({ 
   files, 
@@ -6,9 +8,13 @@ const FileList = ({
   onFileSelect, 
   onFileDrop, 
   onRemoveFile, 
-  onClearAll 
+  onClearAll,
+  onFileUpdate
 }) => {
   const [dragOver, setDragOver] = useState(false);
+  const [fileMetadata, setFileMetadata] = useState({});
+  const [bulkFetching, setBulkFetching] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState(null);
 
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -80,6 +86,8 @@ const FileList = ({
         
         if (!result.canceled && result.filePaths.length > 0) {
           const folderPath = result.filePaths[0];
+          
+          // Temporarily disable rename functionality to test if that's causing the issue
           await scanFolderForMedia(folderPath);
         }
       } catch (error) {
@@ -114,6 +122,159 @@ const FileList = ({
     }
   };
 
+  const showFolderRenameDialog = async (folderPath) => {
+    const folderName = window.nodeAPI.path.basename(folderPath);
+    const parentPath = window.nodeAPI.path.dirname(folderPath);
+    
+    const shouldRename = window.confirm(
+      `Selected folder: "${folderName}"\n\n` +
+      `Would you like to rename this folder to something more organized?\n\n` +
+      `Current path: ${folderPath}`
+    );
+    
+    if (!shouldRename) {
+      return false; // User chose not to rename
+    }
+    
+    const newName = window.prompt(
+      `Enter new name for the folder:\n\n` +
+      `Current name: "${folderName}"`,
+      folderName
+    );
+    
+    if (newName === null) {
+      return null; // User canceled
+    }
+    
+    if (newName === folderName) {
+      return false; // No change needed
+    }
+    
+    if (!newName.trim()) {
+      alert('Folder name cannot be empty.');
+      return await showFolderRenameDialog(folderPath); // Retry
+    }
+    
+    try {
+      const newPath = window.nodeAPI.path.join(parentPath, newName.trim());
+      
+      // Check if folder already exists (the rename function will handle this check)
+      // This avoids potential async issues with pathExists
+      
+      // Perform the rename using electron API
+      const result = await window.electronAPI.renameFolder(folderPath, newPath);
+      
+      if (result.success) {
+        alert(`Folder successfully renamed to: "${newName}"`);
+        return newPath;
+      } else {
+        alert(`Failed to rename folder: ${result.error}`);
+        
+        // If the error is about folder already existing, offer to retry
+        if (result.error.includes('already exists')) {
+          return await showFolderRenameDialog(folderPath); // Retry
+        }
+        
+        return false;
+      }
+    } catch (error) {
+      console.error('Error renaming folder:', error);
+      alert(`Error renaming folder: ${error.message}`);
+      return false;
+    }
+  };
+
+  const handleMetadataLoad = (fileId, metadata) => {
+    setFileMetadata(prev => ({
+      ...prev,
+      [fileId]: metadata
+    }));
+    
+    // Update the file object with metadata info if onFileUpdate is provided
+    if (onFileUpdate) {
+      onFileUpdate(fileId, {
+        hasMetadata: metadata.hasContent,
+        metadataCompleteness: metadata.completeness
+      });
+    }
+  };
+
+  const handleBulkFetchMetadata = async () => {
+    // Check API configuration first
+    const apiConfig = await apiMetadataService.checkApiConfiguration();
+    if (!apiConfig.configured) {
+      alert('Please configure API keys in Settings first.\n\n' + apiConfig.message);
+      return;
+    }
+
+    const selectedFileObjects = files.filter(file => selectedFiles.includes(file.id));
+    
+    if (selectedFileObjects.length === 0) {
+      alert('Please select files to fetch metadata for.');
+      return;
+    }
+
+    const confirmMessage = `Fetch metadata from APIs and write to ${selectedFileObjects.length} selected files?\n\n` +
+                          'This will:\n' +
+                          '• Parse each filename to identify the media\n' +
+                          '• Search APIs for matching content\n' +
+                          '• Write metadata directly to the files\n' +
+                          '• Create backup files (.backup)\n\n' +
+                          'Continue?';
+    
+    if (!confirm(confirmMessage)) {
+      return;
+    }
+
+    setBulkFetching(true);
+    setBulkProgress({
+      current: 0,
+      total: selectedFileObjects.length,
+      currentFile: '',
+      progress: 0
+    });
+
+    try {
+      const result = await apiMetadataService.batchFetchMetadata(
+        selectedFileObjects,
+        {
+          writeToFile: true,
+          createBackup: true,
+          skipIfHasMetadata: false,
+          delayBetweenCalls: 800 // Be respectful to APIs
+        },
+        (progress) => {
+          setBulkProgress(progress);
+        }
+      );
+
+      const summary = result.summary;
+      let message = `Bulk metadata fetch completed!\n\n`;
+      message += `📊 Results:\n`;
+      message += `✅ Successful: ${summary.successful}\n`;
+      message += `⏭️ Skipped: ${summary.skipped}\n`;
+      message += `❌ Failed: ${summary.failed}\n`;
+      
+      if (summary.errors.length > 0 && summary.errors.length <= 5) {
+        message += `\n🚫 Errors:\n${summary.errors.slice(0, 5).join('\n')}`;
+        if (summary.errors.length > 5) {
+          message += `\n... and ${summary.errors.length - 5} more`;
+        }
+      }
+
+      alert(message);
+
+      // The metadata has been written to files, the changes will be visible on next scan
+
+    } catch (error) {
+      console.error('Bulk fetch error:', error);
+      alert(`Error during bulk metadata fetch: ${error.message}`);
+    } finally {
+      setBulkFetching(false);
+      setBulkProgress(null);
+    }
+  };
+
   return (
     <div className="file-list-container">
       <div className="file-list-header">
@@ -134,8 +295,35 @@ const FileList = ({
           <button className="btn btn-secondary" onClick={onClearAll}>
             Clear List
           </button>
+          <button 
+            className="btn btn-primary" 
+            onClick={handleBulkFetchMetadata}
+            disabled={selectedFiles.length === 0 || bulkFetching}
+            title="Fetch metadata from APIs for selected files"
+          >
+            {bulkFetching ? (
+              bulkProgress ? `⏳ ${bulkProgress.progress}% (${bulkProgress.current}/${bulkProgress.total})` : '⏳ Starting...'
+            ) : (
+              `🌐 Fetch Metadata (${selectedFiles.length})`
+            )}
+          </button>
         </div>
       </div>
+
+      {bulkProgress && (
+        <div className="bulk-progress">
+          <div className="progress-info">
+            <span>Fetching metadata: {bulkProgress.currentFile}</span>
+            <span>{bulkProgress.current} of {bulkProgress.total} files</span>
+          </div>
+          <div className="progress-bar">
+            <div 
+              className="progress-fill" 
+              style={{ width: `${bulkProgress.progress}%` }}
+            ></div>
+          </div>
+        </div>
+      )}
 
       <div 
         className={`drop-zone ${dragOver ? 'drag-over' : ''}`}
@@ -167,6 +355,10 @@ const FileList = ({
                   <div className="file-status">
                     Status: <span className={`status-${file.status}`}>{file.status}</span>
                   </div>
+                  <MetadataDisplay 
+                    file={file} 
+                    onMetadataLoad={handleMetadataLoad}
+                  />
                 </div>
                 <div className="file-actions">
                   <button 

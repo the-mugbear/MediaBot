@@ -41,24 +41,46 @@ const SettingsPanel = () => {
     }
   };
 
-  const loadSettings = () => {
+  const loadSettings = async () => {
     try {
-      const savedSettings = localStorage.getItem('mediabot-settings');
-      if (savedSettings) {
-        setSettings(JSON.parse(savedSettings));
+      if (window.electronAPI && window.electronAPI.loadSettings) {
+        const result = await window.electronAPI.loadSettings();
+        if (result.success && result.settings) {
+          setSettings(result.settings);
+          console.log('Settings loaded from file storage');
+        } else {
+          console.log('No saved settings found, using defaults');
+        }
+      } else {
+        // Fallback to localStorage for web mode
+        const savedSettings = localStorage.getItem('mediabot-settings');
+        if (savedSettings) {
+          setSettings(JSON.parse(savedSettings));
+        }
       }
     } catch (error) {
       console.error('Failed to load settings:', error);
     }
   };
 
-  const saveSettings = () => {
+  const saveSettings = async () => {
     try {
-      localStorage.setItem('mediabot-settings', JSON.stringify(settings));
-      alert('Settings saved successfully!');
+      if (window.electronAPI && window.electronAPI.saveSettings) {
+        const result = await window.electronAPI.saveSettings(settings);
+        if (result.success) {
+          alert('Settings saved successfully to file storage!');
+          console.log('Settings saved to:', result.path);
+        } else {
+          throw new Error(result.error);
+        }
+      } else {
+        // Fallback to localStorage for web mode
+        localStorage.setItem('mediabot-settings', JSON.stringify(settings));
+        alert('Settings saved successfully!');
+      }
     } catch (error) {
       console.error('Failed to save settings:', error);
-      alert('Failed to save settings');
+      alert('Failed to save settings: ' + error.message);
     }
   };
 

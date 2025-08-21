@@ -421,7 +421,7 @@ ipcMain.handle('rename-files', async (event, renameOperations) => {
   const results = [];
   
   for (const operation of renameOperations) {
-    const { id, oldPath, newPath, createBackup, needsDirectoryCreation, seasonFolder } = operation;
+    const { id, oldPath, newPath, createBackup, needsDirectoryCreation, seasonFolder, seriesFolder } = operation;
     
     console.log(`Electron: Processing operation - ID: ${id}`);
     console.log(`Electron: - Old path: ${oldPath}`);
@@ -429,6 +429,7 @@ ipcMain.handle('rename-files', async (event, renameOperations) => {
     console.log(`Electron: - Create backup: ${createBackup}`);
     console.log(`Electron: - Needs directory: ${needsDirectoryCreation}`);
     console.log(`Electron: - Season folder: ${seasonFolder}`);
+    console.log(`Electron: - Series folder: ${seriesFolder}`);
     
     try {
       // Sanitize the new filename as a safety measure
@@ -619,13 +620,508 @@ ipcMain.handle('check-ffmpeg', async (event) => {
   });
 });
 
-// Write metadata to a media file
+// Stage metadata in a sidecar file for later processing
+ipcMain.handle('stage-metadata', async (event, filePath, metadataMap, options = {}) => {
+  const fs = require('fs').promises;
+  const path = require('path');
+
+  const stageFile = `${filePath}.metadata.json`;
+  
+  try {
+    // Create metadata staging object
+    const stagedMetadata = {
+      timestamp: new Date().toISOString(),
+      source: metadataMap.encoder || 'MediaBot',
+      confidence: options.confidence || 0.5,
+      mediaType: metadataMap.media_type || 'unknown',
+      metadata: metadataMap,
+      applied: false
+    };
+
+    await fs.writeFile(stageFile, JSON.stringify(stagedMetadata, null, 2), 'utf8');
+    console.log(`Electron: Staged metadata for ${path.basename(filePath)}`);
+    
+    return { 
+      success: true, 
+      stagedFile: stageFile,
+      message: 'Metadata staged successfully' 
+    };
+  } catch (error) {
+    console.error('Electron: Error staging metadata:', error);
+    return { 
+      success: false, 
+      error: `Failed to stage metadata: ${error.message}` 
+    };
+  }
+});
+
+// Check if metadata is already staged for a file
+ipcMain.handle('check-staged-metadata', async (event, filePath) => {
+  const fs = require('fs').promises;
+  const stageFile = `${filePath}.metadata.json`;
+  
+  try {
+    await fs.access(stageFile);
+    const stagedData = JSON.parse(await fs.readFile(stageFile, 'utf8'));
+    
+    return {
+      hasStaged: true,
+      metadata: stagedData,
+      stageFile: stageFile,
+      applied: stagedData.applied || false
+    };
+  } catch (error) {
+    return { hasStaged: false };
+  }
+});
+
+// Apply staged metadata to actual file
+ipcMain.handle('apply-staged-metadata', async (event, filePath, options = {}) => {
+  const fs = require('fs').promises;
+  const path = require('path');
+  const stageFile = `${filePath}.metadata.json`;
+  
+  try {
+    // Read staged metadata
+    const stagedData = JSON.parse(await fs.readFile(stageFile, 'utf8'));
+    const metadataMap = stagedData.metadata;
+    
+    console.log(`Electron: Applying staged metadata to ${path.basename(filePath)}`);
+    
+    // Use the optimized metadata writing logic
+    const result = await applyMetadataToFile(filePath, metadataMap);
+    
+    if (result.success) {
+      // Mark as applied in the staging file
+      stagedData.applied = true;
+      stagedData.appliedTimestamp = new Date().toISOString();
+      await fs.writeFile(stageFile, JSON.stringify(stagedData, null, 2), 'utf8');
+      
+      // Optionally remove staging file if requested
+      if (options.cleanupStaging) {
+        await fs.unlink(stageFile);
+      }
+    }
+    
+    return result;
+  } catch (error) {
+    console.error('Electron: Error applying staged metadata:', error);
+    return { 
+      success: false, 
+      error: `Failed to apply staged metadata: ${error.message}` 
+    };
+  }
+});
+
+// Write metadata to a media file using FFmpeg map_metadata to avoid temp files
 ipcMain.handle('write-metadata', async (event, filePath, metadataMap, options = {}) => {
+  return await applyMetadataToFile(filePath, metadataMap);
+});
+
+// Internal function to apply metadata to file (NO BACKUPS - space efficient)
+async function applyMetadataToFile(filePath, metadataMap) {
+  const { spawn } = require('child_process');
   const fs = require('fs').promises;
   const path = require('path');
 
   console.log('Electron: Writing metadata to:', filePath);
   console.log('Electron: Metadata map:', metadataMap);
+
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Build metadata arguments - output to temp file for atomic replacement
+      const ffmpegArgs = [
+        '-i', filePath,                    // Input file
+        '-map_metadata', '0',              // Copy existing metadata
+        '-c', 'copy',                      // Copy streams without re-encoding
+        '-avoid_negative_ts', 'make_zero', // Help with some MKV files
+        '-y'                               // Overwrite output file
+      ];
+      
+      // Add new metadata options
+      Object.entries(metadataMap).forEach(([key, value]) => {
+        if (value && value.toString().trim()) {
+          // Clean the value - remove problematic characters
+          const cleanValue = value.toString()
+            .replace(/"/g, "'")       // Replace quotes with apostrophes
+            .replace(/\n/g, ' ')      // Replace newlines with spaces
+            .replace(/&/g, 'and')     // Replace & with 'and'
+            .replace(/[<>|]/g, '')    // Remove problematic shell characters
+            .trim();
+          console.log(`Electron: Adding metadata ${key}="${cleanValue}"`);
+          ffmpegArgs.push('-metadata', `${key}=${cleanValue}`);
+        }
+      });
+
+      // Output to a unique temp name with same extension to avoid format detection issues
+      const ext = path.extname(filePath);
+      const baseName = path.basename(filePath, ext);
+      const dirName = path.dirname(filePath);
+      const tempPath = path.join(dirName, `${baseName}.tmp.${Date.now()}${ext}`);
+      ffmpegArgs.push(tempPath);
+
+      console.log('Electron: FFmpeg command:', 'ffmpeg', ffmpegArgs.join(' '));
+
+      // Spawn FFmpeg process
+      const ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      ffmpegProcess.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      ffmpegProcess.stderr.on('data', (data) => {
+        stderr += data.toString();
+        // Only log major progress milestones to reduce spam
+        const timeMatch = data.toString().match(/time=(\d{2}:\d{2}:\d{2})/);
+        if (timeMatch) {
+          console.log(`Electron: Progress: ${timeMatch[1]}`);
+        }
+      });
+
+      ffmpegProcess.on('close', async (code) => {
+        if (code === 0) {
+          try {
+            // Atomic replacement: temp -> original (no backup needed)
+            await fs.rename(tempPath, filePath);
+            console.log('Electron: Metadata writing completed successfully');
+            resolve({ 
+              success: true, 
+              outputPath: filePath,
+              message: 'Metadata written successfully' 
+            });
+          } catch (replaceError) {
+            // Just cleanup temp file if replacement fails
+            try { await fs.unlink(tempPath); } catch {}
+            resolve({ 
+              success: false, 
+              error: `File replacement failed: ${replaceError.message}` 
+            });
+          }
+        } else {
+          // Cleanup temp file on FFmpeg failure
+          try { await fs.unlink(tempPath); } catch {}
+          console.error('Electron: FFmpeg process failed with code:', code);
+          console.error('Electron: FFmpeg stderr:', stderr);
+          
+          resolve({ 
+            success: false, 
+            error: `FFmpeg failed with exit code ${code}: ${stderr || 'Unknown error'}`
+          });
+        }
+      });
+
+      ffmpegProcess.on('error', async (error) => {
+        // Cleanup temp file on spawn error
+        try { await fs.unlink(tempPath); } catch {}
+        console.error('Electron: FFmpeg spawn error:', error);
+        resolve({ 
+          success: false, 
+          error: `Failed to start FFmpeg: ${error.message}`
+        });
+      });
+
+    } catch (error) {
+      resolve({ 
+        success: false, 
+        error: `Setup error: ${error.message}`
+      });
+    }
+  });
+}
+
+// Settings storage using file system (more reliable than localStorage)
+ipcMain.handle('save-settings', async (event, settings) => {
+  const fs = require('fs').promises;
+  const path = require('path');
+  const { app } = require('electron');
+  
+  try {
+    const userDataPath = app.getPath('userData');
+    const settingsPath = path.join(userDataPath, 'mediabot-settings.json');
+    
+    await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+    console.log('Electron: Settings saved to:', settingsPath);
+    
+    return { success: true, path: settingsPath };
+  } catch (error) {
+    console.error('Electron: Failed to save settings:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('load-settings', async (event) => {
+  const fs = require('fs').promises;
+  const path = require('path');
+  const { app } = require('electron');
+  
+  try {
+    const userDataPath = app.getPath('userData');
+    const settingsPath = path.join(userDataPath, 'mediabot-settings.json');
+    
+    const settingsData = await fs.readFile(settingsPath, 'utf8');
+    const settings = JSON.parse(settingsData);
+    
+    console.log('Electron: Settings loaded from:', settingsPath);
+    return { success: true, settings: settings };
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      console.log('Electron: No settings file found, returning defaults');
+      return { success: true, settings: null };
+    }
+    console.error('Electron: Failed to load settings:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Folder operations for rename functionality
+ipcMain.handle('rename-folder', async (event, oldPath, newPath) => {
+  const fs = require('fs').promises;
+  
+  try {
+    console.log('Electron: Renaming folder from:', oldPath);
+    console.log('Electron: Renaming folder to:', newPath);
+    
+    // Check if source folder exists
+    try {
+      await fs.access(oldPath);
+    } catch (error) {
+      return { success: false, error: 'Source folder does not exist' };
+    }
+    
+    // Check if destination already exists
+    try {
+      await fs.access(newPath);
+      return { success: false, error: 'Destination folder already exists' };
+    } catch (error) {
+      // Expected - destination should not exist
+    }
+    
+    // Perform the rename
+    await fs.rename(oldPath, newPath);
+    console.log('Electron: Folder renamed successfully');
+    
+    return { success: true, oldPath, newPath };
+  } catch (error) {
+    console.error('Electron: Failed to rename folder:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('path-exists', async (event, filePath) => {
+  const fs = require('fs').promises;
+  
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    return false;
+  }
+});
+
+// Complete file organization workflow: folders first, then metadata
+ipcMain.handle('organize-files', async (event, operations) => {
+  const fs = require('fs').promises;
+  const path = require('path');
+  
+  console.log('Electron: Starting complete file organization workflow');
+  console.log('Electron: Processing', operations.length, 'files');
+  
+  const results = [];
+  
+  for (const operation of operations) {
+    const result = {
+      id: operation.id,
+      oldPath: operation.oldPath,
+      newPath: operation.newPath,
+      success: false,
+      error: null,
+      metadataWritten: false,
+      foldersCreated: []
+    };
+    
+    try {
+      console.log(`Electron: Processing file ${operation.id}`);
+      console.log(`Electron: Moving ${operation.oldPath} -> ${operation.newPath}`);
+      
+      // Step 1: Create necessary folder structure
+      if (operation.needsDirectoryCreation) {
+        const targetDir = path.dirname(operation.newPath);
+        console.log(`Electron: Creating directory structure: ${targetDir}`);
+        await fs.mkdir(targetDir, { recursive: true });
+        result.foldersCreated.push(targetDir);
+      }
+      
+      // Step 2: Move/rename the file to correct location first
+      try {
+        await fs.access(operation.oldPath);
+      } catch (error) {
+        throw new Error(`Source file does not exist: ${operation.oldPath}`);
+      }
+      
+      // Check if target already exists
+      try {
+        await fs.access(operation.newPath);
+        throw new Error(`Target file already exists: ${operation.newPath}`);
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          throw error;
+        }
+      }
+      
+      // Perform the file move/rename
+      await fs.rename(operation.oldPath, operation.newPath);
+      console.log(`Electron: File moved successfully to ${operation.newPath}`);
+      
+      result.success = true;
+      result.newPath = operation.newPath;
+      
+      // Step 3: Write metadata (if provided) to the file in its new location
+      if (operation.metadata && Object.keys(operation.metadata).length > 0) {
+        try {
+          console.log(`Electron: Writing metadata for ${operation.newPath}`);
+          const metadataResult = await writeMetadataInPlace(operation.newPath, operation.metadata);
+          result.metadataWritten = metadataResult.success;
+          if (!metadataResult.success) {
+            console.warn(`Electron: Metadata writing failed: ${metadataResult.error}`);
+          }
+        } catch (metadataError) {
+          console.warn(`Electron: Metadata writing error: ${metadataError.message}`);
+          // Don't fail the entire operation for metadata errors
+        }
+      }
+      
+      // Step 4: Clean up empty source directories
+      if (operation.cleanupSource) {
+        try {
+          const sourceDir = path.dirname(operation.oldPath);
+          const sourceDirBasename = path.basename(sourceDir);
+          
+          // Check if it looks like an episode folder to clean up
+          if (sourceDirBasename.includes('S0') && sourceDirBasename.includes('E0')) {
+            const remaining = await fs.readdir(sourceDir);
+            const relevantFiles = remaining.filter(file => 
+              !file.startsWith('.') && 
+              !file.endsWith('.nfo') && 
+              !file.toLowerCase().includes('screen')
+            );
+            
+            if (relevantFiles.length === 0) {
+              console.log(`Electron: Removing empty source directory: ${sourceDir}`);
+              await fs.rmdir(sourceDir, { recursive: true });
+            }
+          }
+        } catch (cleanupError) {
+          console.warn(`Electron: Source cleanup failed: ${cleanupError.message}`);
+          // Don't fail for cleanup errors
+        }
+      }
+      
+    } catch (error) {
+      console.error(`Electron: Error processing file ${operation.id}:`, error);
+      result.error = error.message;
+    }
+    
+    results.push(result);
+  }
+  
+  return {
+    success: true,
+    results: results,
+    summary: {
+      total: results.length,
+      successful: results.filter(r => r.success).length,
+      failed: results.filter(r => !r.success).length,
+      metadataWritten: results.filter(r => r.metadataWritten).length
+    }
+  };
+});
+
+// Helper function for metadata writing with minimal temp file in same directory
+async function writeMetadataInPlace(filePath, metadataMap) {
+  const fs = require('fs').promises;
+  const path = require('path');
+  const { spawn } = require('child_process');
+  
+  // Create temp file in same directory
+  const dir = path.dirname(filePath);
+  const name = path.basename(filePath, path.extname(filePath));
+  const ext = path.extname(filePath);
+  const tempPath = path.join(dir, `${name}.writing${ext}`);
+  
+  return new Promise(async (resolve) => {
+    try {
+      const ffmpegArgs = [
+        '-i', filePath,
+        '-map_metadata', '0',
+        '-c', 'copy',
+        '-avoid_negative_ts', 'make_zero'
+      ];
+      
+      Object.entries(metadataMap).forEach(([key, value]) => {
+        if (value && value.toString().trim()) {
+          const cleanValue = value.toString()
+            .replace(/"/g, "'")
+            .replace(/\n/g, ' ')
+            .replace(/&/g, 'and')
+            .replace(/[<>|]/g, '')
+            .trim();
+          ffmpegArgs.push('-metadata', `${key}=${cleanValue}`);
+        }
+      });
+      
+      ffmpegArgs.push(tempPath);
+      
+      const ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      
+      let stderr = '';
+      ffmpegProcess.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+      
+      ffmpegProcess.on('close', async (code) => {
+        if (code === 0) {
+          try {
+            // Replace original with temp file
+            await fs.unlink(filePath);
+            await fs.rename(tempPath, filePath);
+            resolve({ success: true });
+          } catch (replaceError) {
+            // Cleanup temp file if replace fails
+            try { await fs.unlink(tempPath); } catch {}
+            resolve({ success: false, error: `File replacement failed: ${replaceError.message}` });
+          }
+        } else {
+          // Cleanup temp file on FFmpeg failure
+          try { await fs.unlink(tempPath); } catch {}
+          resolve({ success: false, error: `FFmpeg failed: ${stderr}` });
+        }
+      });
+      
+      ffmpegProcess.on('error', async (error) => {
+        // Cleanup temp file on spawn error
+        try { await fs.unlink(tempPath); } catch {}
+        resolve({ success: false, error: error.message });
+      });
+      
+    } catch (error) {
+      resolve({ success: false, error: error.message });
+    }
+  });
+}
+
+// Read metadata from a media file
+ipcMain.handle('read-metadata', async (event, filePath) => {
+  const fs = require('fs').promises;
+  const path = require('path');
+
+  console.log('Electron: Reading metadata from:', filePath);
 
   try {
     // Check if fluent-ffmpeg is available
@@ -636,63 +1132,36 @@ ipcMain.handle('write-metadata', async (event, filePath, metadataMap, options = 
       console.error('Electron: fluent-ffmpeg not available:', requireError);
       return { 
         success: false, 
-        error: 'FFmpeg not installed. Please install FFmpeg to enable metadata writing.' 
+        error: 'FFmpeg not installed. Please install FFmpeg to read metadata.',
+        metadata: {}
       };
     }
 
     // Check if source file exists
     await fs.access(filePath);
 
-    // Create temporary output path
-    const ext = path.extname(filePath);
-    const tempPath = filePath.replace(ext, '_temp' + ext);
-
     return new Promise((resolve, reject) => {
-      let ffmpegCommand = ffmpeg(filePath);
-
-      // Add metadata options
-      Object.entries(metadataMap).forEach(([key, value]) => {
-        if (value && value.toString().trim()) {
-          ffmpegCommand = ffmpegCommand.outputOptions(['-metadata', `${key}=${value}`]);
+      ffmpeg.ffprobe(filePath, (err, metadata) => {
+        if (err) {
+          console.error('Electron: FFprobe error:', err);
+          resolve({ 
+            success: false, 
+            error: err.message,
+            metadata: {}
+          });
+        } else {
+          console.log('Electron: Metadata read successfully');
+          resolve({ 
+            success: true, 
+            metadata: metadata,
+            message: 'Metadata read successfully' 
+          });
         }
       });
-
-      // Set codec options to avoid re-encoding (much faster)
-      ffmpegCommand = ffmpegCommand
-        .outputOptions(['-c', 'copy']) // Copy streams without re-encoding
-        .output(tempPath);
-
-      ffmpegCommand
-        .on('end', async () => {
-          try {
-            console.log('Electron: Metadata writing completed');
-            
-            // Replace original file with temp file
-            await fs.unlink(filePath);
-            await fs.rename(tempPath, filePath);
-            
-            resolve({ 
-              success: true, 
-              outputPath: filePath,
-              message: 'Metadata written successfully' 
-            });
-          } catch (error) {
-            console.error('Electron: Error replacing file:', error);
-            reject({ success: false, error: error.message });
-          }
-        })
-        .on('error', (err) => {
-          console.error('Electron: FFmpeg error:', err);
-          reject({ success: false, error: err.message });
-        })
-        .on('progress', (progress) => {
-          console.log('Electron: Processing: ' + progress.percent + '% done');
-        })
-        .run();
     });
 
   } catch (error) {
-    console.error('Electron: Error writing metadata:', error);
-    return { success: false, error: error.message };
+    console.error('Electron: Error reading metadata:', error);
+    return { success: false, error: error.message, metadata: {} };
   }
 });

@@ -92,6 +92,12 @@ function App() {
     setSelectedFiles([]);
   };
 
+  const handleFileUpdate = (fileId, updates) => {
+    setFiles(prev => prev.map(file => 
+      file.id === fileId ? { ...file, ...updates } : file
+    ));
+  };
+
   const renderContent = () => {
     switch (activeTab) {
       case 'files':
@@ -103,6 +109,7 @@ function App() {
             onFileDrop={handleFileDrop}
             onRemoveFile={removeFile}
             onClearAll={clearAllFiles}
+            onFileUpdate={handleFileUpdate}
           />
         );
       case 'rename':
