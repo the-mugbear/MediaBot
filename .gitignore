@@ -1,0 +1,144 @@
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Testing
+/coverage
+*.lcov
+.nyc_output/
+
+# Production builds
+/build
+/dist
+/release
+/out
+app/
+release-builds/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE and editors
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+.directory
+.Trash-*
+.nfs*
+.AppleDouble
+.LSOverride
+Icon
+
+# Cache and temporary files
+.npm
+.eslintcache
+.stylelintcache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+.cache
+.parcel-cache
+tmp/
+temp/
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Electron specific
+/src/**/*.js.map
+/src/**/*.jsx.map
+.webpack/
+
+# Electron distribution files
+*.app
+*.dmg
+*.pkg
+*.exe
+*.msi
+*.deb
+*.rpm
+*.AppImage
+*.snap
+
+# MediaBot specific
+# User settings and preferences
+user-data/
+config/local.json
+config/development.json
+config/production.json
+
+# API keys and sensitive data
+config/keys.json
+config/secrets.json
+.secrets
+*.key
+*.pem
+*.p12
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+
+# Backup files
+*.backup
+*.bak
+*.old
+
+# Test media files
+test-files/
+sample-media/
+test-media/
+
+# FFmpeg binaries (if bundled)
+ffmpeg/
+ffprobe/
+
+# TypeScript
+*.tsbuildinfo
+
+# Optional directories
+jspm_packages/
+
+# Yarn
+.yarn-integrity
+
+# Debug files
+debug.log
+electron-debug.log
+
+# Package manager lock files (keep package-lock.json for consistency)
+# yarn.lock
