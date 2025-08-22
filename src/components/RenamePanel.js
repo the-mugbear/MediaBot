@@ -273,7 +273,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         
         // Parse the filename to extract metadata
         const parsed = metadataService.parseFileName(file.name, file.path);
-        console.log(`Parsed metadata:`, parsed);
+        console.log(`Parsed metadata for ${file.name}:`, parsed);
         
         // Send debug info to Electron console
         if (window.electronAPI && window.electronAPI.debugLog) {

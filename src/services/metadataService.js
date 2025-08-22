@@ -477,7 +477,15 @@ class MetadataService {
       
       // Clean titles to remove existing episode patterns
       const cleanSeriesTitle = this.cleanTitleForFormatting(metadata.title || 'Unknown Show');
-      const cleanEpisodeTitle = this.cleanTitleForFormatting(metadata.episodeTitle || 'Unknown Episode');
+      
+      // Handle episode title with fallback
+      let cleanEpisodeTitle;
+      if (metadata.episodeTitle) {
+        cleanEpisodeTitle = this.cleanTitleForFormatting(metadata.episodeTitle);
+      } else {
+        // If no episode title, create a generic one
+        cleanEpisodeTitle = `Episode ${metadata.episode || 'Unknown'}`;
+      }
       
       cleanName = cleanName
         .replace(/{n}/g, this.sanitizeFileName(cleanSeriesTitle))
@@ -502,7 +510,34 @@ class MetadataService {
       };
     }
 
-    // Fallback for unknown types
+    // Fallback for unknown types - still need to process template variables
+    // Clean titles to remove existing episode patterns
+    const cleanTitle = this.cleanTitleForFormatting(metadata.title || metadata.name || 'Unknown');
+    
+    // Try to extract episode title if missing, or use a differentiated fallback
+    let cleanEpisodeTitle;
+    if (metadata.episodeTitle) {
+      cleanEpisodeTitle = this.cleanTitleForFormatting(metadata.episodeTitle);
+    } else if (metadata.season && metadata.episode) {
+      // If we have season/episode info but no episode title, create a generic one
+      cleanEpisodeTitle = `Episode ${metadata.episode}`;
+    } else {
+      // Last resort - use the title but mark it as episode
+      cleanEpisodeTitle = this.cleanTitleForFormatting(metadata.title || metadata.name || 'Unknown Episode');
+    }
+    
+    // Even for unknown types, process template variables
+    const season = metadata.season ? metadata.season.toString().padStart(2, '0') : '00';
+    const episode = metadata.episode ? metadata.episode.toString().padStart(2, '0') : '00';
+    
+    cleanName = cleanName
+      .replace(/{n}/g, this.sanitizeFileName(cleanTitle))
+      .replace(/{s}/g, metadata.season || 0)
+      .replace(/{e}/g, metadata.episode || 0)
+      .replace(/{s00e00}/g, `S${season}E${episode}`)
+      .replace(/{t}/g, this.sanitizeFileName(cleanEpisodeTitle))
+      .replace(/{y}/g, metadata.year || 'Unknown');
+    
     cleanName = this.sanitizeFileName(cleanName);
     const ext = originalExtension.startsWith('.') ? originalExtension : `.${originalExtension}`;
     return {
