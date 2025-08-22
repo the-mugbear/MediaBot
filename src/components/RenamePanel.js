@@ -452,7 +452,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
       window.nodeAPI.path.basename(currentDirectory) : 
       currentDirectory.split('/').pop();
     
-    // Check if the file is already in a proper Season XX folder
+    // Check if the file is already in a proper Season XX folder (case insensitive)
     const seasonPattern = /^Season\s+(\d+)$/i;
     const isInSeasonFolder = seasonPattern.test(currentFolderName);
     
@@ -569,7 +569,11 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         console.log(`Mapping rename: ${file.path} -> ${newPath}`);
         
         // Check if source and destination are the same (no operation needed)
-        if (file.path === newPath) {
+        // Normalize paths for cross-platform comparison
+        const normalizedOldPath = file.path.replace(/\\/g, '/').toLowerCase();
+        const normalizedNewPath = newPath.replace(/\\/g, '/').toLowerCase();
+        
+        if (normalizedOldPath === normalizedNewPath) {
           console.log(`Skipping file - already in correct location: ${file.path}`);
           return null; // Will be filtered out
         }

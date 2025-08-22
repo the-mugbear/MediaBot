@@ -217,6 +217,11 @@ class MetadataService {
     return title
       // Replace dots and underscores with spaces
       .replace(/[._]/g, ' ')
+      // Remove episode patterns to prevent duplication (case insensitive)
+      .replace(/\bS\d{1,2}E\d{1,2}\b/gi, '')
+      .replace(/\bSeason\s*\d{1,2}\s*Episode\s*\d{1,2}\b/gi, '')
+      .replace(/\bEp\s*\d{1,2}\b/gi, '')
+      .replace(/\bEpisode\s*\d{1,2}\b/gi, '')
       // Remove quality indicators
       .replace(/\b(1080p|720p|2160p|4K|BluRay|WEBRip|DVDRip|WEB-DL|HDTV|x264|x265|H\.264|HEVC|HDR|DDP5\.1|AMZN)\b/gi, '')
       // Remove release groups (at the end)
@@ -425,15 +430,37 @@ class MetadataService {
       .trim(); // Remove leading/trailing whitespace
   }
 
+  // Clean existing episode patterns from titles to prevent duplication
+  cleanTitleForFormatting(title) {
+    return title
+      // Remove existing episode patterns (case insensitive)
+      .replace(/\bS\d{1,2}E\d{1,2}\b/gi, '') // S01E01, S1E1, etc.
+      .replace(/\bSeason\s*\d{1,2}\s*Episode\s*\d{1,2}\b/gi, '') // Season 1 Episode 1
+      .replace(/\bEp\s*\d{1,2}\b/gi, '') // Ep01, Ep1, etc.
+      .replace(/\bEpisode\s*\d{1,2}\b/gi, '') // Episode 01, Episode 1
+      // Remove quality indicators and release artifacts
+      .replace(/\b(1080p|720p|2160p|4K|BluRay|WEBRip|DVDRip|WEB-DL|HDTV|x264|x265|H\.264|HEVC|HDR|DDP5\.1|AMZN)\b/gi, '')
+      // Remove release groups and brackets
+      .replace(/\[([^\]]+)\]/g, '')
+      .replace(/\(([^)]+)\)/g, '')
+      .replace(/-([A-Z0-9]+)$/gi, '')
+      // Replace dots and underscores with spaces
+      .replace(/[._-]/g, ' ')
+      // Remove extra whitespace
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   // Generate clean filename and path based on format and metadata
   generateFileName(metadata, format, originalExtension, originalPath) {
     let cleanName = format;
 
     if (metadata.type === 'movie') {
+      const cleanMovieTitle = this.cleanTitleForFormatting(metadata.title || 'Unknown Movie');
       cleanName = cleanName
-        .replace(/{n}/g, this.sanitizeFileName(metadata.title || 'Unknown Movie'))
+        .replace(/{n}/g, this.sanitizeFileName(cleanMovieTitle))
         .replace(/{y}/g, metadata.year || 'Unknown')
-        .replace(/{t}/g, this.sanitizeFileName(metadata.title || 'Unknown Movie'));
+        .replace(/{t}/g, this.sanitizeFileName(cleanMovieTitle));
       
       // For movies, just return the filename (no folder organization)
       cleanName = this.sanitizeFileName(cleanName);
@@ -448,18 +475,22 @@ class MetadataService {
       const season = metadata.season ? metadata.season.toString().padStart(2, '0') : '00';
       const episode = metadata.episode ? metadata.episode.toString().padStart(2, '0') : '00';
       
+      // Clean titles to remove existing episode patterns
+      const cleanSeriesTitle = this.cleanTitleForFormatting(metadata.title || 'Unknown Show');
+      const cleanEpisodeTitle = this.cleanTitleForFormatting(metadata.episodeTitle || 'Unknown Episode');
+      
       cleanName = cleanName
-        .replace(/{n}/g, this.sanitizeFileName(metadata.title || 'Unknown Show'))
+        .replace(/{n}/g, this.sanitizeFileName(cleanSeriesTitle))
         .replace(/{s}/g, metadata.season || 0)
         .replace(/{e}/g, metadata.episode || 0)
         .replace(/{s00e00}/g, `S${season}E${episode}`)
-        .replace(/{t}/g, this.sanitizeFileName(metadata.episodeTitle || 'Unknown Episode'))
+        .replace(/{t}/g, this.sanitizeFileName(cleanEpisodeTitle))
         .replace(/{y}/g, metadata.year || 'Unknown');
 
       // For TV shows, organize into series/season folder hierarchy
       cleanName = this.sanitizeFileName(cleanName);
       const ext = originalExtension.startsWith('.') ? originalExtension : `.${originalExtension}`;
-      const seriesName = this.sanitizeFileName(metadata.title || 'Unknown Show');
+      const seriesName = this.sanitizeFileName(cleanSeriesTitle);
       const seasonFolder = `Season ${metadata.season || 1}`;
       
       return {
