@@ -245,9 +245,7 @@ class MetadataService {
       const data = await response.json();
       
       if (data.results && data.results.length > 0) {
-        const movie = data.results[0];
-        return {
-          success: true,
+        const matches = data.results.slice(0, 10).map(movie => ({
           id: movie.id,
           title: movie.title,
           name: movie.title,
@@ -255,7 +253,17 @@ class MetadataService {
           year: movie.release_date ? new Date(movie.release_date).getFullYear() : null,
           overview: movie.overview,
           confidence: this.calculateConfidence(title, movie.title, year, movie.release_date),
-          source: 'TheMovieDB'
+          source: 'TheMovieDB',
+          poster_path: movie.poster_path
+        }));
+        
+        // Sort by confidence score (highest first)
+        matches.sort((a, b) => b.confidence - a.confidence);
+        
+        return {
+          success: true,
+          matches,
+          bestMatch: matches[0] // Keep best match for backward compatibility
         };
       }
 
@@ -284,36 +292,48 @@ class MetadataService {
       const data = await response.json();
       
       if (data.results && data.results.length > 0) {
-        const show = data.results[0];
+        const matches = [];
         
-        // Get episode details if season/episode provided
-        let episodeTitle = null;
-        if (season && episode) {
-          try {
-            const episodeUrl = `https://api.themoviedb.org/3/tv/${show.id}/season/${season}/episode/${episode}?api_key=${apiKey}`;
-            const episodeResponse = await fetch(episodeUrl);
-            if (episodeResponse.ok) {
-              const episodeData = await episodeResponse.json();
-              episodeTitle = episodeData.name;
+        // Process up to 10 results
+        for (const show of data.results.slice(0, 10)) {
+          // Get episode details if season/episode provided
+          let episodeTitle = null;
+          if (season && episode) {
+            try {
+              const episodeUrl = `https://api.themoviedb.org/3/tv/${show.id}/season/${season}/episode/${episode}?api_key=${apiKey}`;
+              const episodeResponse = await fetch(episodeUrl);
+              if (episodeResponse.ok) {
+                const episodeData = await episodeResponse.json();
+                episodeTitle = episodeData.name;
+              }
+            } catch (e) {
+              console.warn('Could not fetch episode details for', show.name, e);
             }
-          } catch (e) {
-            console.warn('Could not fetch episode details:', e);
           }
+          
+          matches.push({
+            id: show.id,
+            name: show.name,
+            title: show.name,
+            first_air_date: show.first_air_date,
+            year: show.first_air_date ? new Date(show.first_air_date).getFullYear() : null,
+            season,
+            episode,
+            episodeTitle,
+            overview: show.overview,
+            confidence: this.calculateConfidence(title, show.name),
+            source: 'TheMovieDB',
+            poster_path: show.poster_path
+          });
         }
+        
+        // Sort by confidence score (highest first)
+        matches.sort((a, b) => b.confidence - a.confidence);
 
         return {
           success: true,
-          id: show.id,
-          name: show.name,
-          title: show.name,
-          first_air_date: show.first_air_date,
-          year: show.first_air_date ? new Date(show.first_air_date).getFullYear() : null,
-          season,
-          episode,
-          episodeTitle,
-          overview: show.overview,
-          confidence: this.calculateConfidence(title, show.name),
-          source: 'TheMovieDB'
+          matches,
+          bestMatch: matches[0] // Keep best match for backward compatibility
         };
       }
 

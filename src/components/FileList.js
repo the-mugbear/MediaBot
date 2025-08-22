@@ -1,6 +1,11 @@
-import React, { useState } from 'react';
-import MetadataDisplay from './MetadataDisplay';
+import React, { useState, useEffect } from 'react';
+import FileListItem from './FileListItem';
+import BulkActions from './BulkActions';
+import ProgressDisplay from './ProgressDisplay';
+import FileOperations from './FileOperations';
+import InteractiveBulkMetadata from './InteractiveBulkMetadata';
 import apiMetadataService from '../services/apiMetadataService';
+import dependencyService from '../services/dependencyService';
 
 const FileList = ({ 
   files, 
@@ -15,6 +20,9 @@ const FileList = ({
   const [fileMetadata, setFileMetadata] = useState({});
   const [bulkFetching, setBulkFetching] = useState(false);
   const [bulkProgress, setBulkProgress] = useState(null);
+  const [dependencyStatus, setDependencyStatus] = useState(null);
+  const [showInteractiveBulk, setShowInteractiveBulk] = useState(false);
+  const [bulkFiles, setBulkFiles] = useState([]);
 
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -200,7 +208,13 @@ const FileList = ({
   };
 
   const handleBulkFetchMetadata = async () => {
-    // Check API configuration first
+    // Check dependencies first
+    const validation = await dependencyService.validateOperation(['ffmpeg']);
+    if (!validation.valid) {
+      return; // User was already prompted with installation instructions
+    }
+
+    // Check API configuration
     const apiConfig = await apiMetadataService.checkApiConfiguration();
     if (!apiConfig.configured) {
       alert('Please configure API keys in Settings first.\n\n' + apiConfig.message);
@@ -214,115 +228,81 @@ const FileList = ({
       return;
     }
 
-    const confirmMessage = `Fetch metadata from APIs and write to ${selectedFileObjects.length} selected files?\n\n` +
+    const confirmMessage = `Start interactive metadata fetch for ${selectedFileObjects.length} selected files?\n\n` +
                           'This will:\n' +
-                          '• Parse each filename to identify the media\n' +
-                          '• Search APIs for matching content\n' +
-                          '• Write metadata directly to the files\n' +
-                          '• Create backup files (.backup)\n\n' +
+                          '• Show you potential matches for each file\n' +
+                          '• Let you confirm or select the correct metadata\n' +
+                          '• Apply metadata only after your confirmation\n' +
+                          '• Allow you to skip files with incorrect matches\n\n' +
                           'Continue?';
     
     if (!confirm(confirmMessage)) {
       return;
     }
 
-    setBulkFetching(true);
-    setBulkProgress({
-      current: 0,
-      total: selectedFileObjects.length,
-      currentFile: '',
-      progress: 0
-    });
+    setBulkFiles(selectedFileObjects);
+    setShowInteractiveBulk(true);
+  };
 
-    try {
-      const result = await apiMetadataService.batchFetchMetadata(
-        selectedFileObjects,
-        {
-          writeToFile: true,
-          createBackup: true,
-          skipIfHasMetadata: false,
-          delayBetweenCalls: 800 // Be respectful to APIs
-        },
-        (progress) => {
-          setBulkProgress(progress);
-        }
-      );
-
-      const summary = result.summary;
-      let message = `Bulk metadata fetch completed!\n\n`;
-      message += `📊 Results:\n`;
-      message += `✅ Successful: ${summary.successful}\n`;
-      message += `⏭️ Skipped: ${summary.skipped}\n`;
-      message += `❌ Failed: ${summary.failed}\n`;
-      
-      if (summary.errors.length > 0 && summary.errors.length <= 5) {
-        message += `\n🚫 Errors:\n${summary.errors.slice(0, 5).join('\n')}`;
-        if (summary.errors.length > 5) {
-          message += `\n... and ${summary.errors.length - 5} more`;
-        }
-      }
-
-      alert(message);
-
-      // The metadata has been written to files, the changes will be visible on next scan
-
-    } catch (error) {
-      console.error('Bulk fetch error:', error);
-      alert(`Error during bulk metadata fetch: ${error.message}`);
-    } finally {
-      setBulkFetching(false);
-      setBulkProgress(null);
+  const handleInteractiveBulkComplete = (result) => {
+    setShowInteractiveBulk(false);
+    setBulkFiles([]);
+    
+    if (!result.success && result.error) {
+      // Handle setup errors (like missing API keys)
+      alert(`Interactive metadata fetch failed:\n\n${result.error}`);
+      return;
     }
+    
+    const summary = result.summary;
+    let message = `Interactive metadata fetch completed!\n\n`;
+    message += `📊 Results:\n`;
+    message += `✅ Confirmed: ${summary.successful}\n`;
+    message += `⏭️ Skipped: ${summary.skipped}\n`;
+    message += `❌ Failed: ${summary.failed}\n`;
+    
+    if (summary.errors.length > 0 && summary.errors.length <= 5) {
+      message += `\n🚫 Errors:\n${summary.errors.slice(0, 5).join('\n')}`;
+      if (summary.errors.length > 5) {
+        message += `\n... and ${summary.errors.length - 5} more`;
+      }
+    }
+
+    alert(message);
+  };
+
+  const handleInteractiveBulkCancel = () => {
+    setShowInteractiveBulk(false);
+    setBulkFiles([]);
   };
 
   return (
     <div className="file-list-container">
       <div className="file-list-header">
         <h2>Media Files</h2>
-        <div className="file-list-actions">
-          <button className="btn btn-primary" onClick={handleOpenFiles}>
-            📁 Open Files
-          </button>
-          <button className="btn btn-primary" onClick={handleOpenFolder}>
-            📂 Open Folder
-          </button>
-          <button className="btn btn-secondary" onClick={selectAll}>
-            Select All
-          </button>
-          <button className="btn btn-secondary" onClick={deselectAll}>
-            Deselect All
-          </button>
-          <button className="btn btn-secondary" onClick={onClearAll}>
-            Clear List
-          </button>
-          <button 
-            className="btn btn-primary" 
-            onClick={handleBulkFetchMetadata}
-            disabled={selectedFiles.length === 0 || bulkFetching}
-            title="Fetch metadata from APIs for selected files"
-          >
-            {bulkFetching ? (
-              bulkProgress ? `⏳ ${bulkProgress.progress}% (${bulkProgress.current}/${bulkProgress.total})` : '⏳ Starting...'
-            ) : (
-              `🌐 Fetch Metadata (${selectedFiles.length})`
-            )}
-          </button>
-        </div>
+        <FileOperations 
+          onOpenFiles={handleOpenFiles}
+          onOpenFolder={handleOpenFolder}
+        />
+        <BulkActions
+          selectedFilesCount={selectedFiles.length}
+          bulkFetching={bulkFetching}
+          bulkProgress={bulkProgress}
+          onSelectAll={selectAll}
+          onDeselectAll={deselectAll}
+          onClearAll={onClearAll}
+          onBulkFetchMetadata={handleBulkFetchMetadata}
+        />
       </div>
 
-      {bulkProgress && (
-        <div className="bulk-progress">
-          <div className="progress-info">
-            <span>Fetching metadata: {bulkProgress.currentFile}</span>
-            <span>{bulkProgress.current} of {bulkProgress.total} files</span>
-          </div>
-          <div className="progress-bar">
-            <div 
-              className="progress-fill" 
-              style={{ width: `${bulkProgress.progress}%` }}
-            ></div>
-          </div>
-        </div>
+      <ProgressDisplay progress={bulkProgress} />
+
+      {showInteractiveBulk && (
+        <InteractiveBulkMetadata
+          files={bulkFiles}
+          onComplete={handleInteractiveBulkComplete}
+          onCancel={handleInteractiveBulkCancel}
+        />
       )}
 
       <div 
@@ -340,35 +320,14 @@ const FileList = ({
         ) : (
           <div className="file-grid">
             {files.map(file => (
-              <div 
-                key={file.id} 
-                className={`file-item ${selectedFiles.includes(file.id) ? 'selected' : ''}`}
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedFiles.includes(file.id)}
-                  onChange={() => handleFileSelect(file.id)}
-                />
-                <div className="file-info">
-                  <div className="file-name">{file.name}</div>
-                  <div className="file-path">{file.directory}</div>
-                  <div className="file-status">
-                    Status: <span className={`status-${file.status}`}>{file.status}</span>
-                  </div>
-                  <MetadataDisplay 
-                    file={file} 
-                    onMetadataLoad={handleMetadataLoad}
-                  />
-                </div>
-                <div className="file-actions">
-                  <button 
-                    className="btn btn-secondary"
-                    onClick={() => onRemoveFile(file.id)}
-                  >
-                    Remove
-                  </button>
-                </div>
-              </div>
+              <FileListItem
+                key={file.id}
+                file={file}
+                isSelected={selectedFiles.includes(file.id)}
+                onFileSelect={handleFileSelect}
+                onRemoveFile={onRemoveFile}
+                onMetadataLoad={handleMetadataLoad}
+              />
             ))}
           </div>
         )}

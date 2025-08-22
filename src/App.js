@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import FileList from './components/FileList';
 import RenamePanel from './components/RenamePanel';
 import SettingsPanel from './components/SettingsPanel';
+import DependencyChecker from './components/DependencyChecker';
 import './App.css';
 
 function App() {
@@ -128,12 +129,14 @@ function App() {
   };
 
   return (
-    <div className="app-container">
-      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
-      <main className="main-content">
-        {renderContent()}
-      </main>
-    </div>
+    <DependencyChecker>
+      <div className="app-container">
+        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+        <main className="main-content">
+          {renderContent()}
+        </main>
+      </div>
+    </DependencyChecker>
   );
 }
 

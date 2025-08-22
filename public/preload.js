@@ -18,13 +18,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   testApiKey: (service, apiKey) => ipcRenderer.invoke('test-api-key', service, apiKey),
 
   // File renaming and organization
-  testRenameConnection: () => ipcRenderer.invoke('test-rename-connection'),
   renameFiles: (renameOperations) => ipcRenderer.invoke('rename-files', renameOperations),
   organizeFiles: (organizeOperations) => ipcRenderer.invoke('organize-files', organizeOperations),
   restoreBackupFiles: (folderPath) => ipcRenderer.invoke('restore-backup-files', folderPath),
   
   // Debug logging
   debugLog: (message, data) => ipcRenderer.invoke('debug-log', message, data),
+  
+  // Enhanced logging with levels
+  log: (level, message, data) => ipcRenderer.invoke('renderer-log', level, message, data),
 
   // Metadata writing and reading
   checkFFmpeg: () => ipcRenderer.invoke('check-ffmpeg'),
@@ -52,10 +54,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel)
 });
 
-// Node.js APIs for main process operations
+// Safe Node.js API wrappers (synchronous path operations for compatibility)
 contextBridge.exposeInMainWorld('nodeAPI', {
-  path: require('path'),
-  fs: require('fs-extra'),
-  glob: require('glob'),
-  os: require('os')
+  path: {
+    // These are safe synchronous operations that don't access the filesystem
+    basename: (filePath) => {
+      if (typeof filePath !== 'string') return '';
+      const normalized = filePath.replace(/\\/g, '/');
+      const parts = normalized.split('/');
+      return parts[parts.length - 1] || '';
+    },
+    dirname: (filePath) => {
+      if (typeof filePath !== 'string') return '';
+      const normalized = filePath.replace(/\\/g, '/');
+      const parts = normalized.split('/');
+      parts.pop();
+      return parts.join('/') || '/';
+    },
+    join: (...paths) => {
+      if (paths.length === 0) return '';
+      return paths
+        .filter(path => typeof path === 'string' && path.length > 0)
+        .join('/')
+        .replace(/\/+/g, '/');
+    },
+    extname: (filePath) => {
+      if (typeof filePath !== 'string') return '';
+      const basename = filePath.split('/').pop() || '';
+      const lastDot = basename.lastIndexOf('.');
+      return lastDot > 0 ? basename.substring(lastDot) : '';
+    }
+  }
 });

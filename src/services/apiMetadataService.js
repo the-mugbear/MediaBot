@@ -27,6 +27,37 @@ class ApiMetadataService {
     try {
       console.log('ApiMetadataService: Starting metadata fetch for:', file.name);
       
+      // Check if metadata is provided directly (from interactive selection)
+      if (options.useProvidedMetadata) {
+        console.log('ApiMetadataService: Using provided metadata for:', file.name);
+        result.metadata = options.useProvidedMetadata;
+        
+        // Skip to metadata writing step
+        if (options.writeToFile !== false) {
+          console.log('ApiMetadataService: Writing provided metadata to file');
+          try {
+            const ffmpegMetadata = this.createFFmpegMetadataMap(options.useProvidedMetadata);
+            const writeResult = await window.electronAPI.writeMetadata(file.path, ffmpegMetadata, {
+              backup: options.createBackup || false
+            });
+            
+            if (writeResult.success) {
+              result.writtenMetadata = options.useProvidedMetadata;
+              console.log('ApiMetadataService: Successfully wrote provided metadata to file');
+            } else {
+              result.error = `Failed to write provided metadata to file: ${writeResult.error}`;
+              return result;
+            }
+          } catch (writeError) {
+            result.error = `Failed to write provided metadata to file: ${writeError.message}`;
+            return result;
+          }
+        }
+        
+        result.success = true;
+        return result;
+      }
+      
       // STEP 1: Check for staged metadata first to avoid redundant API calls
       const stagedCheck = await window.electronAPI.checkStagedMetadata(file.path);
       if (stagedCheck.hasStaged) {

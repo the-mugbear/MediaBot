@@ -1,11 +1,16 @@
 import React, { useState, useEffect } from 'react';
+import MetadataMatchSelector from './MetadataMatchSelector';
 import metadataService from '../services/metadataService';
 import metadataWriter from '../services/metadataWriter';
+import settingsService from '../services/settingsService';
+import dependencyService from '../services/dependencyService';
 
 const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
   const [format, setFormat] = useState('{n} - {s00e00} - {t}');
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState([]);
+  const [pendingMatches, setPendingMatches] = useState([]);
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
 
   useEffect(() => {
     // Load API keys from settings when component mounts
@@ -14,24 +19,9 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
 
   const loadApiKeys = async () => {
     try {
-      let settings = null;
-      
-      // Try file-based storage first (Electron)
-      if (window.electronAPI && window.electronAPI.loadSettings) {
-        const result = await window.electronAPI.loadSettings();
-        if (result.success && result.settings) {
-          settings = result.settings;
-        }
-      } else {
-        // Fallback to localStorage
-        const savedSettings = localStorage.getItem('mediabot-settings');
-        if (savedSettings) {
-          settings = JSON.parse(savedSettings);
-        }
-      }
-      
-      if (settings && settings.apiKeys) {
-        metadataService.setApiKeys(settings.apiKeys);
+      const apiKeys = await settingsService.getApiKeys();
+      if (apiKeys && Object.keys(apiKeys).length > 0) {
+        metadataService.setApiKeys(apiKeys);
         console.log('API keys loaded in RenamePanel');
       }
     } catch (error) {
@@ -49,6 +39,213 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
 
   const selectedFilesList = files.filter(file => selectedFiles.includes(file.id));
 
+  const handleMatchSelection = async (selectedMatch) => {
+    const currentPendingMatch = pendingMatches[currentMatchIndex];
+    if (!currentPendingMatch) return;
+    
+    const fileIndex = currentPendingMatch.fileIndex;
+    console.log(`User selected series for ${currentPendingMatch.fileName}:`, selectedMatch);
+    
+    // The selected match is the series - now we need to apply this series to all related files
+    // and fetch episode-specific details for each
+    await applySelectedSeriesToRelatedFiles(selectedMatch);
+    
+    // Move to next pending match or clear if done
+    const newPendingMatches = pendingMatches.filter((_, index) => index !== currentMatchIndex);
+    setPendingMatches(newPendingMatches);
+    
+    // If there are more matches to handle, move to the next one
+    if (newPendingMatches.length > 0) {
+      // Adjust currentMatchIndex if we removed an item before it
+      if (currentMatchIndex >= newPendingMatches.length) {
+        setCurrentMatchIndex(newPendingMatches.length - 1);
+      }
+      // Otherwise keep the same index (next item moved into this position)
+    } else {
+      setCurrentMatchIndex(0);
+    }
+  };
+
+  const applySelectedSeriesToRelatedFiles = async (selectedSeries) => {
+    console.log('Applying selected series to related files:', selectedSeries);
+    
+    const currentPendingMatch = pendingMatches[currentMatchIndex];
+    if (!currentPendingMatch) return;
+    
+    // Get all file indexes that need to be updated for this series
+    const targetFileIndexes = currentPendingMatch.fileIndexes;
+    
+    // Update results with episode-specific metadata for each file
+    const updatedResults = [...results];
+    
+    for (const fileIndex of targetFileIndexes) {
+      const result = updatedResults[fileIndex];
+      
+      try {
+        // Get episode-specific details for this file
+        const parsedInfo = result.metadata;
+        let episodeMetadata = null;
+        
+        if (parsedInfo.season && parsedInfo.episode && selectedSeries.id) {
+          console.log(`Fetching episode details for S${parsedInfo.season}E${parsedInfo.episode} of ${selectedSeries.title || selectedSeries.name}`);
+          
+          // Fetch episode details using the selected series ID
+          const episodeResult = await metadataService.getEpisodeDetails(
+            selectedSeries.id,
+            parsedInfo.season,
+            parsedInfo.episode
+          );
+          
+          if (episodeResult.success && episodeResult.episode) {
+            episodeMetadata = {
+              // Series-level info from selected match
+              id: selectedSeries.id,
+              title: selectedSeries.title || selectedSeries.name,
+              name: selectedSeries.title || selectedSeries.name,
+              year: selectedSeries.year,
+              overview: episodeResult.episode.overview || selectedSeries.overview,
+              source: selectedSeries.source,
+              type: 'tv',
+              
+              // Episode-specific info
+              season: parsedInfo.season,
+              episode: parsedInfo.episode,
+              episodeTitle: episodeResult.episode.name || episodeResult.episode.title,
+              
+              // Confidence
+              confidence: selectedSeries.confidence || 0.9
+            };
+            
+            console.log(`Found episode metadata for ${result.originalName}:`, episodeMetadata);
+          }
+        }
+        
+        // Fallback to series info if episode details not found or for movies
+        if (!episodeMetadata) {
+          episodeMetadata = {
+            ...parsedInfo,
+            id: selectedSeries.id,
+            title: selectedSeries.title || selectedSeries.name,
+            name: selectedSeries.title || selectedSeries.name,
+            year: selectedSeries.year,
+            overview: selectedSeries.overview,
+            source: selectedSeries.source,
+            confidence: selectedSeries.confidence || 0.8
+          };
+        }
+        
+        // Regenerate filename with episode-specific metadata
+        const fileExtension = result.originalName.split('.').pop();
+        const file = selectedFilesList.find(f => f.id === result.id);
+        const filenameInfo = metadataService.generateFileName(episodeMetadata, format, `.${fileExtension}`, file?.path);
+        
+        // Update the result
+        updatedResults[fileIndex] = {
+          ...result,
+          metadata: episodeMetadata,
+          confidence: episodeMetadata.confidence,
+          hasMultipleMatches: false, // Mark as resolved
+          newName: filenameInfo.filename,
+          seasonFolder: filenameInfo.seasonFolder,
+          seriesFolder: filenameInfo.seriesFolder,
+          needsDirectoryCreation: filenameInfo.needsDirectoryCreation,
+          matches: [{ 
+            source: episodeMetadata.source || 'API', 
+            title: episodeMetadata.title, 
+            year: episodeMetadata.year || 'Unknown',
+            type: episodeMetadata.type || 'tv'
+          }]
+        };
+        
+        console.log(`Updated filename for ${result.originalName}: ${filenameInfo.filename}`);
+        
+      } catch (error) {
+        console.error(`Failed to fetch episode details for ${result.originalName}:`, error);
+        // Keep the original result if episode fetch fails
+      }
+    }
+    
+    setResults(updatedResults);
+    console.log(`Applied selected series to ${targetFileIndexes.length} episodes`);
+  };
+
+  const handleMatchSkip = () => {
+    const currentPendingMatch = pendingMatches[currentMatchIndex];
+    if (!currentPendingMatch) return;
+    
+    console.log(`Skipping match selection for ${currentPendingMatch.fileName}`);
+    
+    // Remove this match from pending matches
+    const newPendingMatches = pendingMatches.filter((_, index) => index !== currentMatchIndex);
+    setPendingMatches(newPendingMatches);
+    
+    // If there are more matches to handle, move to the next one
+    if (newPendingMatches.length > 0) {
+      // Adjust currentMatchIndex if we removed an item before it
+      if (currentMatchIndex >= newPendingMatches.length) {
+        setCurrentMatchIndex(newPendingMatches.length - 1);
+      }
+      // Otherwise keep the same index (next item moved into this position)
+    } else {
+      setCurrentMatchIndex(0);
+    }
+  };
+
+  const checkForMultipleMatches = (resultsList) => {
+    // Group results by series title to avoid showing the same series selection multiple times
+    const seriesGroups = {};
+    
+    resultsList.forEach((result, index) => {
+      if (result.metadata?.hasMultipleMatches && result.metadata?.allMatches && result.metadata.type === 'tv') {
+        const seriesTitle = result.metadata.title;
+        
+        if (!seriesGroups[seriesTitle]) {
+          seriesGroups[seriesTitle] = {
+            seriesTitle,
+            matches: result.metadata.allMatches,
+            mediaType: result.metadata.type,
+            fileIndexes: [index],
+            representativeFile: result.originalName,
+            episodeCount: 1
+          };
+        } else {
+          // Add this episode to the existing series group
+          seriesGroups[seriesTitle].fileIndexes.push(index);
+          seriesGroups[seriesTitle].episodeCount++;
+        }
+      } else if (result.metadata?.hasMultipleMatches && result.metadata?.allMatches && result.metadata.type === 'movie') {
+        // For movies, handle individually since each movie is unique
+        const movieTitle = result.metadata.title;
+        seriesGroups[`movie_${index}`] = {
+          seriesTitle: movieTitle,
+          matches: result.metadata.allMatches,
+          mediaType: result.metadata.type,
+          fileIndexes: [index],
+          representativeFile: result.originalName,
+          episodeCount: 1
+        };
+      }
+    });
+    
+    const multipleMatches = Object.values(seriesGroups).map(group => ({
+      fileIndexes: group.fileIndexes, // All episodes in this series
+      fileName: group.representativeFile,
+      matches: group.matches,
+      mediaType: group.mediaType,
+      originalTitle: group.seriesTitle,
+      episodeCount: group.episodeCount,
+      seriesTitle: group.seriesTitle
+    }));
+    
+    if (multipleMatches.length > 0) {
+      console.log(`Found ${multipleMatches.length} series/movies with multiple matches, showing selector`);
+      setPendingMatches(multipleMatches);
+      setCurrentMatchIndex(0);
+      return true; // Indicate that matches need user selection
+    }
+    return false; // No matches need selection
+  };
+
   const handleFormatChange = (e) => {
     setFormat(e.target.value);
   };
@@ -57,6 +254,12 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     if (selectedFilesList.length === 0) {
       alert('Please select files to rename');
       return;
+    }
+
+    // Check dependencies before processing
+    const validation = await dependencyService.validateOperation(['ffmpeg']);
+    if (!validation.valid) {
+      return; // User was already prompted with installation instructions
     }
 
     setIsProcessing(true);
@@ -88,8 +291,27 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         }
 
         if (lookupResult && lookupResult.success) {
-          metadata = { ...parsed, ...lookupResult };
-          console.log(`Found metadata:`, metadata);
+          // Check if we have multiple matches that need user selection
+          if (lookupResult.matches && lookupResult.matches.length > 1) {
+            // Store multiple matches for user selection
+            const matchData = {
+              file,
+              parsed,
+              matches: lookupResult.matches,
+              fileIndex: previews.length
+            };
+            
+            // For now, use the best match but mark it for potential user review
+            metadata = { ...parsed, ...lookupResult.bestMatch };
+            metadata.hasMultipleMatches = true;
+            metadata.allMatches = lookupResult.matches;
+            console.log(`Found ${lookupResult.matches.length} matches for ${file.name}, using best match:`, metadata);
+          } else {
+            // Single match or best match
+            const selectedMatch = lookupResult.bestMatch || lookupResult.matches?.[0] || lookupResult;
+            metadata = { ...parsed, ...selectedMatch };
+            console.log(`Found single match:`, metadata);
+          }
         } else {
           // Fallback to parsed data
           metadata = parsed;
@@ -158,6 +380,14 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
       
       setResults(previews);
       console.log('Preview generation complete:', previews);
+      
+      // Check if any results have multiple matches that need user selection
+      const hasMultipleMatches = checkForMultipleMatches(previews);
+      if (hasMultipleMatches) {
+        console.log('Multiple matches found, showing match selector...');
+      } else {
+        console.log('No multiple matches found, preview ready for execution');
+      }
     } catch (error) {
       console.error('Preview failed:', error);
       alert('Failed to generate preview: ' + error.message);
@@ -196,8 +426,12 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           alert(`Restored ${successful.length} files, ${failed.length} failed.`);
         }
         
-        // Refresh the file list
-        window.location.reload();
+        // Request parent component to refresh file list
+        if (onUpdateFiles) {
+          // Trigger a refresh by clearing and reloading
+          // This is better than a hard page reload
+          alert('Backups restored successfully. Please refresh the file list manually or re-scan the folder.');
+        }
       } else {
         throw new Error(result.error);
       }
@@ -207,6 +441,76 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const determineCorrectFilePath = (file, result) => {
+    const currentDirectory = window.nodeAPI ? 
+      window.nodeAPI.path.dirname(file.path) : 
+      file.path.substring(0, file.path.lastIndexOf('/'));
+    
+    const currentFolderName = window.nodeAPI ? 
+      window.nodeAPI.path.basename(currentDirectory) : 
+      currentDirectory.split('/').pop();
+    
+    // Check if the file is already in a proper Season XX folder
+    const seasonPattern = /^Season\s+(\d+)$/i;
+    const isInSeasonFolder = seasonPattern.test(currentFolderName);
+    
+    if (isInSeasonFolder) {
+      const currentSeasonMatch = currentFolderName.match(seasonPattern);
+      const currentSeasonNumber = currentSeasonMatch ? parseInt(currentSeasonMatch[1]) : null;
+      const targetSeasonNumber = result.metadata?.season;
+      
+      // If already in the correct season folder, just rename the file in place
+      if (currentSeasonNumber === targetSeasonNumber) {
+        const newPath = window.nodeAPI ?
+          window.nodeAPI.path.join(currentDirectory, result.newName) :
+          `${currentDirectory}/${result.newName}`;
+        
+        console.log(`File already in correct Season ${targetSeasonNumber} folder, renaming in place`);
+        return newPath;
+      }
+    }
+    
+    // Check if file is in an individual episode folder that should be consolidated
+    const isInEpisodeFolder = currentFolderName.includes('S0') && currentFolderName.includes('E0');
+    
+    let baseDirectory;
+    if (isInEpisodeFolder) {
+      // Go up one level to consolidate from episode subfolders
+      baseDirectory = window.nodeAPI ? 
+        window.nodeAPI.path.dirname(currentDirectory) : 
+        currentDirectory.split('/').slice(0, -1).join('/');
+    } else if (isInSeasonFolder) {
+      // If in wrong season folder, go up to series level
+      baseDirectory = window.nodeAPI ? 
+        window.nodeAPI.path.dirname(currentDirectory) : 
+        currentDirectory.split('/').slice(0, -1).join('/');
+    } else {
+      baseDirectory = currentDirectory;
+    }
+    
+    // For TV shows, create proper Season XX folder structure
+    if (result.metadata?.type === 'tv' && result.metadata?.season) {
+      const seasonFolder = `Season ${result.metadata.season}`;
+      
+      if (result.seriesFolder) {
+        // Full series/season structure
+        return window.nodeAPI ?
+          window.nodeAPI.path.join(baseDirectory, result.seriesFolder, seasonFolder, result.newName) :
+          `${baseDirectory}/${result.seriesFolder}/${seasonFolder}/${result.newName}`;
+      } else {
+        // Just season folder
+        return window.nodeAPI ?
+          window.nodeAPI.path.join(baseDirectory, seasonFolder, result.newName) :
+          `${baseDirectory}/${seasonFolder}/${result.newName}`;
+      }
+    }
+    
+    // For movies or files without season info, just rename in current directory
+    return window.nodeAPI ?
+      window.nodeAPI.path.join(baseDirectory, result.newName) :
+      `${baseDirectory}/${result.newName}`;
   };
 
   const executeRename = async () => {
@@ -219,31 +523,11 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     let createBackup = false;
     let writeMetadata = true; // Default to true
     try {
-      let settings = null;
-      
-      // Try file-based storage first (Electron)
-      if (window.electronAPI && window.electronAPI.loadSettings) {
-        const result = await window.electronAPI.loadSettings();
-        if (result.success && result.settings) {
-          settings = result.settings;
-        }
-      } else {
-        // Fallback to localStorage
-        const savedSettings = localStorage.getItem('mediabot-settings');
-        if (savedSettings) {
-          settings = JSON.parse(savedSettings);
-        }
-      }
-      
-      if (settings) {
-        console.log('Loaded settings:', settings);
-        createBackup = settings.preferences?.createBackup === true;
-        writeMetadata = settings.preferences?.writeMetadata !== false; // Default to true unless explicitly disabled
-        console.log('Create backup setting:', createBackup);
-        console.log('Write metadata setting:', writeMetadata);
-      } else {
-        console.log('No settings found, using defaults (backup: false, metadata: true)');
-      }
+      const preferences = await settingsService.getPreferences();
+      createBackup = preferences?.createBackup === true;
+      writeMetadata = preferences?.writeMetadata !== false; // Default to true unless explicitly disabled
+      console.log('Create backup setting:', createBackup);
+      console.log('Write metadata setting:', writeMetadata);
     } catch (error) {
       console.warn('Failed to load settings:', error);
     }
@@ -262,13 +546,9 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
       console.log('Results:', results);
       console.log('nodeAPI available:', !!window.nodeAPI);
       
-      // Test IPC connection first
-      try {
-        const testResult = await window.electronAPI.testRenameConnection();
-        console.log('IPC test result:', testResult);
-      } catch (error) {
-        console.error('IPC test failed:', error);
-        throw new Error('IPC communication failed: ' + error.message);
+      // Check if electronAPI is available
+      if (!window.electronAPI || !window.electronAPI.organizeFiles) {
+        throw new Error('Electron API not available. Please restart the application.');
       }
       
       // Prepare rename operations for the backend
@@ -283,67 +563,16 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           throw new Error(`File path not available for ${file.name || 'unknown file'}`);
         }
         
-        // Handle season folder creation for TV shows
-        let newPath;
-        if (window.nodeAPI && window.nodeAPI.path) {
-          const currentDirectory = window.nodeAPI.path.dirname(file.path);
-          const currentBasename = window.nodeAPI.path.basename(currentDirectory);
-          
-          // Check if the file is in an individual episode folder (e.g., "Alien.Earth.S01E01.1080p.x265-ELiTE")
-          const isInEpisodeFolder = currentBasename.includes('S0') && currentBasename.includes('E0');
-          
-          let baseDirectory;
-          if (isInEpisodeFolder) {
-            // Go up one level to consolidate from episode subfolders
-            baseDirectory = window.nodeAPI.path.dirname(currentDirectory);
-          } else {
-            baseDirectory = currentDirectory;
-          }
-          
-          if (result.needsDirectoryCreation && result.seasonFolder) {
-            // TV show - place in series/season folder structure
-            if (result.seriesFolder) {
-              newPath = window.nodeAPI.path.join(baseDirectory, result.seriesFolder, result.seasonFolder, result.newName);
-            } else {
-              // Fallback to just season folder if no series folder
-              newPath = window.nodeAPI.path.join(baseDirectory, result.seasonFolder, result.newName);
-            }
-          } else {
-            // Movie or no season folder needed
-            newPath = window.nodeAPI.path.join(baseDirectory, result.newName);
-          }
-        } else {
-          // Fallback path manipulation
-          const currentDirectory = file.path.substring(0, file.path.lastIndexOf('/'));
-          const currentBasename = currentDirectory.split('/').pop();
-          
-          // Check if the file is in an individual episode folder
-          const isInEpisodeFolder = currentBasename.includes('S0') && currentBasename.includes('E0');
-          
-          let baseDirectory;
-          if (isInEpisodeFolder) {
-            // Go up one level to consolidate from episode subfolders
-            const pathParts = currentDirectory.split('/');
-            pathParts.pop();
-            baseDirectory = pathParts.join('/');
-          } else {
-            baseDirectory = currentDirectory;
-          }
-          
-          if (result.needsDirectoryCreation && result.seasonFolder) {
-            // TV show - place in series/season folder structure
-            if (result.seriesFolder) {
-              newPath = `${baseDirectory}/${result.seriesFolder}/${result.seasonFolder}/${result.newName}`;
-            } else {
-              // Fallback to just season folder if no series folder
-              newPath = `${baseDirectory}/${result.seasonFolder}/${result.newName}`;
-            }
-          } else {
-            newPath = `${baseDirectory}/${result.newName}`;
-          }
-        }
+        // Determine the correct path for this file
+        const newPath = determineCorrectFilePath(file, result);
         
         console.log(`Mapping rename: ${file.path} -> ${newPath}`);
+        
+        // Check if source and destination are the same (no operation needed)
+        if (file.path === newPath) {
+          console.log(`Skipping file - already in correct location: ${file.path}`);
+          return null; // Will be filtered out
+        }
         
         return {
           id: result.id,
@@ -354,7 +583,12 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           seasonFolder: result.seasonFolder,
           seriesFolder: result.seriesFolder
         };
-      });
+      }).filter(operation => operation !== null); // Remove skipped files
+
+      if (renameOperations.length === 0) {
+        alert('All files are already in the correct location and format. No rename operations needed.');
+        return;
+      }
 
       console.log('Sending rename operations to backend:', renameOperations);
       console.log('Individual operations:');
@@ -535,7 +769,34 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         </div>
       </div>
 
-      {results.length > 0 && (
+      {pendingMatches.length > 0 && (
+        <div className="rename-match-selection">
+          <div className="match-selection-header">
+            <h3>🎬 Select Correct Series/Movie</h3>
+            <p>Selection {currentMatchIndex + 1} of {pendingMatches.length}:</p>
+            <div className="current-file-info">
+              <strong>📺 {pendingMatches[currentMatchIndex]?.seriesTitle}</strong>
+              {pendingMatches[currentMatchIndex]?.episodeCount > 1 && (
+                <div className="episode-count">
+                  ({pendingMatches[currentMatchIndex]?.episodeCount} episodes will be affected)
+                </div>
+              )}
+              <div className="representative-file">
+                Example file: {pendingMatches[currentMatchIndex]?.fileName}
+              </div>
+            </div>
+          </div>
+          <MetadataMatchSelector
+            matches={pendingMatches[currentMatchIndex]?.matches}
+            originalTitle={pendingMatches[currentMatchIndex]?.originalTitle}
+            mediaType={pendingMatches[currentMatchIndex]?.mediaType}
+            onSelect={handleMatchSelection}
+            onCancel={handleMatchSkip}
+          />
+        </div>
+      )}
+
+      {results.length > 0 && pendingMatches.length === 0 && (
         <div className="rename-results">
           <h3>Rename Preview</h3>
           <div className="results-list">
