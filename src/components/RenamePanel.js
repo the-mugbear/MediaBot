@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import MetadataMatchSelector from './MetadataMatchSelector';
+import MetadataRefinement from './MetadataRefinement';
 import metadataService from '../services/metadataService';
 import metadataWriter from '../services/metadataWriter';
 import settingsService from '../services/settingsService';
@@ -14,6 +15,8 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
   const [pendingMatches, setPendingMatches] = useState([]);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const [metadataCache, setMetadataCache] = useState(new Map());
+  const [failedLookups, setFailedLookups] = useState([]);
+  const [showRefinement, setShowRefinement] = useState(false);
 
   useEffect(() => {
     // Load API keys from settings when component mounts
@@ -364,6 +367,90 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     return format === 'custom' ? customFormat : format;
   };
 
+  // Handle refinement completion
+  const handleRefinementComplete = (refinedResults) => {
+    logger.info('Processing refinement results', {
+      totalResults: refinedResults.length,
+      refinedCount: refinedResults.filter(r => !r.skipped && r.metadata).length,
+      skippedCount: refinedResults.filter(r => r.skipped).length
+    });
+
+    // Update results with refined metadata
+    const updatedResults = results.map(result => {
+      const refinedResult = refinedResults.find(r => r.fileId === result.id);
+      
+      if (refinedResult && !refinedResult.skipped && refinedResult.metadata) {
+        // Generate new filename with refined metadata
+        const fileExtension = result.originalName.split('.').pop();
+        const file = selectedFilesList.find(f => f.id === result.id);
+        const filenameInfo = metadataService.generateFileName(
+          refinedResult.metadata, 
+          getEffectiveFormat(), 
+          `.${fileExtension}`, 
+          file?.path
+        );
+
+        logger.success(`Applied refined metadata for ${result.originalName}`, {
+          originalQuery: refinedResult.searchQuery,
+          selectedTitle: refinedResult.metadata.title,
+          newFilename: filenameInfo.filename
+        });
+
+        return {
+          ...result,
+          metadata: refinedResult.metadata,
+          newName: filenameInfo.filename,
+          confidence: 0.9, // High confidence for user-selected results
+          seasonFolder: filenameInfo.seasonFolder,
+          seriesFolder: filenameInfo.seriesFolder,
+          needsDirectoryCreation: filenameInfo.needsDirectoryCreation,
+          matches: [
+            {
+              source: refinedResult.metadata.source || 'User Selected',
+              title: refinedResult.metadata.title,
+              year: refinedResult.metadata.year || 'Unknown',
+              type: refinedResult.metadata.type || 'unknown'
+            }
+          ]
+        };
+      }
+      
+      return result;
+    });
+
+    setResults(updatedResults);
+    
+    // Remove refined files from failed lookups
+    const remainingFailedLookups = failedLookups.filter(failed => 
+      !refinedResults.some(refined => refined.fileId === failed.id && !refined.skipped)
+    );
+    setFailedLookups(remainingFailedLookups);
+    
+    setShowRefinement(false);
+    
+    logger.success('Refinement process completed successfully', {
+      updatedFiles: updatedResults.filter(r => refinedResults.some(rf => rf.fileId === r.id && !rf.skipped)).length,
+      remainingFailedLookups: remainingFailedLookups.length
+    });
+  };
+
+  // Handle refinement cancellation
+  const handleRefinementCancel = () => {
+    logger.info('User cancelled metadata refinement process');
+    setShowRefinement(false);
+  };
+
+  // Start refinement process
+  const startRefinementProcess = () => {
+    if (failedLookups.length === 0) {
+      alert('No failed lookups to refine');
+      return;
+    }
+
+    logger.info(`Starting refinement process for ${failedLookups.length} failed lookups`);
+    setShowRefinement(true);
+  };
+
   const previewRename = async () => {
     if (selectedFilesList.length === 0) {
       logger.warn('Preview rename attempted with no files selected');
@@ -388,6 +475,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         fileNames: selectedFilesList.map(f => f.name) 
       });
       const previews = [];
+      const currentFailedLookups = [];
 
       for (const file of selectedFilesList) {
         logger.file(`Processing file: ${file.name}`, { path: file.path });
@@ -450,6 +538,17 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           cacheMetadata(file.id, metadata);
           
         } else {
+          // Track this as a failed lookup for potential refinement
+          const failedLookup = {
+            id: file.id,
+            name: file.name,
+            path: file.path,
+            parsed: parsed,
+            originalLookupType: parsed.type,
+            failureReason: lookupResult ? 'API call failed' : 'Unknown media type'
+          };
+          currentFailedLookups.push(failedLookup);
+          
           // Fallback to parsed data
           metadata = parsed;
           
@@ -464,7 +563,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           
           logger.warn(`No metadata found for ${file.name}, using parsed data`, { 
             confidence: metadata.confidence,
-            fallbackReason: lookupResult ? 'API call failed' : 'Unknown media type'
+            failureReason: lookupResult ? 'API call failed' : 'Unknown media type'
           });
         }
 
@@ -563,6 +662,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
       }
       
       setResults(previews);
+      setFailedLookups(currentFailedLookups);
       
       // Check for multiple matches that need user selection
       const hasMultipleMatches = checkForMultipleMatches(previews);
@@ -571,11 +671,14 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         filesProcessed: previews.length,
         averageConfidence: (previews.reduce((sum, p) => sum + p.confidence, 0) / previews.length * 100).toFixed(1) + '%',
         multipleMatchesFound: hasMultipleMatches,
+        failedLookupsCount: currentFailedLookups.length,
         processingMode: 'api_lookup_with_staging'
       });
       
       if (hasMultipleMatches) {
         logger.info('Multiple matches found - user selection required');
+      } else if (currentFailedLookups.length > 0) {
+        logger.warn(`${currentFailedLookups.length} files had failed metadata lookups and may need refinement`);
       } else {
         logger.success('Preview ready for execution');
       }
@@ -1018,6 +1121,17 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           >
             Restore Backups
           </button>
+
+          {failedLookups.length > 0 && (
+            <button 
+              className="btn btn-orange" 
+              onClick={startRefinementProcess}
+              disabled={isProcessing}
+              title={`Refine ${failedLookups.length} failed metadata lookups`}
+            >
+              🔍 Refine Failed Lookups ({failedLookups.length})
+            </button>
+          )}
         </div>
       </div>
 
@@ -1050,7 +1164,24 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
 
       {results.length > 0 && pendingMatches.length === 0 && (
         <div className="rename-results">
-          <h3>Rename Preview</h3>
+          <div className="preview-header">
+            <h3>Rename Preview</h3>
+            {failedLookups.length > 0 && (
+              <div className="failed-lookups-summary">
+                <span className="warning-icon">⚠️</span>
+                <span className="warning-text">
+                  {failedLookups.length} file(s) had failed metadata lookups
+                </span>
+                <button 
+                  className="btn-link" 
+                  onClick={startRefinementProcess}
+                  disabled={isProcessing}
+                >
+                  Click to refine
+                </button>
+              </div>
+            )}
+          </div>
           <div className="results-list">
             {results.map(result => (
               <div key={result.id} className="result-item">
@@ -1197,6 +1328,13 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           <p>Processing files...</p>
         </div>
       )}
+
+      <MetadataRefinement
+        failedFiles={failedLookups}
+        onRetryComplete={handleRefinementComplete}
+        onCancel={handleRefinementCancel}
+        isVisible={showRefinement}
+      />
     </div>
   );
 };
