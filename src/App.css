@@ -695,3 +695,323 @@ details[open] {
   padding: 8px 20px;
   font-size: 0.9em;
 }
+
+/* ===========================================
+   TERMINAL COMPONENT - CYBERPUNK THEME
+   =========================================== */
+
+.terminal-toggle-button {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: linear-gradient(45deg, var(--cyber-neon-green), #00cc44);
+  color: var(--cyber-bg-primary);
+  border: 2px solid var(--cyber-neon-green);
+  border-radius: 8px;
+  padding: 12px 16px;
+  cursor: pointer;
+  font-family: var(--cyber-font-mono);
+  font-weight: 600;
+  font-size: 0.9em;
+  box-shadow: 0 0 20px rgba(57, 255, 20, 0.3);
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 1000;
+}
+
+.terminal-toggle-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 30px rgba(57, 255, 20, 0.5);
+}
+
+.terminal-container {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--cyber-bg-primary);
+  border-top: 2px solid var(--cyber-neon-green);
+  box-shadow: 0 -5px 30px rgba(0, 0, 0, 0.7);
+  z-index: 999;
+  font-family: var(--cyber-font-mono);
+  transition: all 0.3s ease;
+}
+
+.terminal-container.collapsed {
+  height: 300px;
+}
+
+.terminal-container.expanded {
+  height: 60vh;
+}
+
+.terminal-header {
+  background: var(--cyber-bg-secondary);
+  border-bottom: 1px solid var(--cyber-neon-green);
+  padding: 10px 15px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.terminal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--cyber-neon-green);
+  font-weight: 600;
+  font-size: 0.95em;
+}
+
+.terminal-icon {
+  font-size: 1.1em;
+}
+
+.log-count {
+  color: var(--cyber-text-secondary);
+  font-size: 0.85em;
+}
+
+.terminal-controls {
+  display: flex;
+  gap: 5px;
+}
+
+.terminal-control-btn {
+  background: transparent;
+  border: 1px solid var(--cyber-surface);
+  color: var(--cyber-text-secondary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s ease;
+}
+
+.terminal-control-btn:hover {
+  border-color: var(--cyber-neon-green);
+  color: var(--cyber-neon-green);
+  background: rgba(57, 255, 20, 0.1);
+}
+
+.terminal-content {
+  height: calc(100% - 80px);
+  overflow-y: auto;
+  padding: 15px;
+  background: var(--cyber-bg-primary);
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyber-neon-green) var(--cyber-bg-secondary);
+}
+
+.terminal-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-content::-webkit-scrollbar-track {
+  background: var(--cyber-bg-secondary);
+}
+
+.terminal-content::-webkit-scrollbar-thumb {
+  background: var(--cyber-neon-green);
+  border-radius: 4px;
+}
+
+.terminal-welcome {
+  margin-bottom: 20px;
+  color: var(--cyber-neon-green);
+}
+
+.terminal-line {
+  display: flex;
+  margin-bottom: 5px;
+  font-size: 0.9em;
+}
+
+.terminal-prompt {
+  color: var(--cyber-neon-cyan);
+  min-width: 120px;
+  font-weight: 600;
+}
+
+.terminal-text {
+  color: var(--cyber-text-primary);
+}
+
+.terminal-divider {
+  color: var(--cyber-text-secondary);
+  margin: 10px 0;
+  font-size: 0.8em;
+  opacity: 0.5;
+}
+
+.terminal-log-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+
+.terminal-log-entry:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.log-timestamp {
+  color: var(--cyber-text-muted);
+  font-size: 0.8em;
+  min-width: 80px;
+  font-family: var(--cyber-font-mono);
+}
+
+.log-icon {
+  font-size: 0.9em;
+  min-width: 20px;
+}
+
+.log-level {
+  font-weight: 600;
+  min-width: 60px;
+  font-size: 0.8em;
+}
+
+.log-message {
+  color: var(--cyber-text-primary);
+  flex: 1;
+  word-break: break-word;
+}
+
+.log-data {
+  margin-top: 8px;
+  margin-left: 20px;
+  background: var(--cyber-bg-secondary);
+  border: 1px solid var(--cyber-surface);
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 0.75em;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.log-data pre {
+  margin: 0;
+  color: var(--cyber-neon-cyan);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-error {
+  border-left: 3px solid var(--cyber-error);
+  background: rgba(255, 71, 87, 0.05);
+}
+
+.log-warn {
+  border-left: 3px solid var(--cyber-warning);
+  background: rgba(255, 102, 0, 0.05);
+}
+
+.log-success {
+  border-left: 3px solid var(--cyber-success);
+  background: rgba(57, 255, 20, 0.05);
+}
+
+.log-info {
+  border-left: 3px solid var(--cyber-info);
+  background: rgba(0, 255, 255, 0.05);
+}
+
+.log-debug {
+  border-left: 3px solid var(--cyber-text-secondary);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.log-file {
+  border-left: 3px solid var(--cyber-neon-cyan);
+  background: rgba(0, 255, 255, 0.05);
+}
+
+.log-api {
+  border-left: 3px solid var(--cyber-neon-purple);
+  background: rgba(191, 0, 255, 0.05);
+}
+
+.log-metadata {
+  border-left: 3px solid var(--cyber-neon-orange);
+  background: rgba(255, 102, 0, 0.05);
+}
+
+.terminal-empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--cyber-text-secondary);
+}
+
+.scroll-indicator {
+  position: sticky;
+  bottom: 10px;
+  text-align: center;
+  margin-top: 10px;
+}
+
+.scroll-to-bottom-btn {
+  background: var(--cyber-neon-green);
+  color: var(--cyber-bg-primary);
+  border: none;
+  border-radius: 20px;
+  padding: 8px 16px;
+  font-size: 0.8em;
+  cursor: pointer;
+  font-family: var(--cyber-font-mono);
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.scroll-to-bottom-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 15px rgba(57, 255, 20, 0.3);
+}
+
+.terminal-footer {
+  background: var(--cyber-bg-secondary);
+  border-top: 1px solid var(--cyber-surface);
+  padding: 8px 15px;
+  font-size: 0.8em;
+}
+
+.terminal-status {
+  color: var(--cyber-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Terminal responsive design */
+@media (max-width: 768px) {
+  .terminal-container.collapsed {
+    height: 250px;
+  }
+  
+  .terminal-container.expanded {
+    height: 50vh;
+  }
+  
+  .terminal-toggle-button {
+    bottom: 15px;
+    right: 15px;
+    padding: 10px 12px;
+    font-size: 0.8em;
+  }
+  
+  .log-timestamp {
+    display: none;
+  }
+  
+  .terminal-log-entry {
+    font-size: 0.8em;
+  }
+}

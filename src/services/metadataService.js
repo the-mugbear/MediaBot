@@ -234,6 +234,7 @@ class MetadataService {
 
   // Search for movie metadata
   async searchMovie(title, year) {
+    const startTime = Date.now();
     try {
       const apiKey = this.apiKeys.themoviedb;
       if (!apiKey) {
@@ -242,6 +243,7 @@ class MetadataService {
 
       const searchUrl = `https://api.themoviedb.org/3/search/movie?api_key=${apiKey}&query=${encodeURIComponent(title)}${year ? `&year=${year}` : ''}`;
       
+      console.log(`🌐 API Call: Movie search for "${title}" ${year ? `(${year})` : ''}`);
       const response = await fetch(searchUrl);
       if (!response.ok) {
         throw new Error(`API request failed: ${response.status}`);
@@ -265,6 +267,9 @@ class MetadataService {
         // Sort by confidence score (highest first)
         matches.sort((a, b) => b.confidence - a.confidence);
         
+        const duration = Date.now() - startTime;
+        console.log(`✅ Movie search completed in ${duration}ms - found ${matches.length} matches`);
+        
         return {
           success: true,
           matches,
@@ -272,15 +277,21 @@ class MetadataService {
         };
       }
 
+      const duration = Date.now() - startTime;
+      console.log(`❌ Movie search completed in ${duration}ms - no results`);
       return { success: false, error: 'No results found' };
     } catch (error) {
-      console.error('Movie search error:', error);
+      const duration = Date.now() - startTime;
+      console.error(`❌ Movie search failed in ${duration}ms:`, error);
       return { success: false, error: error.message };
     }
   }
 
   // Search for TV show metadata
   async searchTVShow(title, season, episode) {
+    const startTime = Date.now();
+    let episodeApiCalls = 0;
+    
     try {
       const apiKey = this.apiKeys.themoviedb;
       if (!apiKey) {
@@ -289,6 +300,7 @@ class MetadataService {
 
       const searchUrl = `https://api.themoviedb.org/3/search/tv?api_key=${apiKey}&query=${encodeURIComponent(title)}`;
       
+      console.log(`🌐 API Call: TV show search for "${title}"`);
       const response = await fetch(searchUrl);
       if (!response.ok) {
         throw new Error(`API request failed: ${response.status}`);
@@ -299,12 +311,18 @@ class MetadataService {
       if (data.results && data.results.length > 0) {
         const matches = [];
         
-        // Process up to 10 results
-        for (const show of data.results.slice(0, 10)) {
-          // Get episode details if season/episode provided
+        // OPTIMIZATION: Only fetch episode details for the BEST match to reduce API calls
+        const topShows = data.results.slice(0, 3); // Limit to top 3 instead of 10
+        
+        for (let i = 0; i < topShows.length; i++) {
+          const show = topShows[i];
           let episodeTitle = null;
-          if (season && episode) {
+          
+          // Only fetch episode details for the first (best) match to improve performance
+          if (i === 0 && season && episode) {
             try {
+              episodeApiCalls++;
+              console.log(`🌐 API Call: Episode details for ${show.name} S${season}E${episode}`);
               const episodeUrl = `https://api.themoviedb.org/3/tv/${show.id}/season/${season}/episode/${episode}?api_key=${apiKey}`;
               const episodeResponse = await fetch(episodeUrl);
               if (episodeResponse.ok) {
@@ -495,17 +513,42 @@ class MetadataService {
         .replace(/{t}/g, this.sanitizeFileName(cleanEpisodeTitle))
         .replace(/{y}/g, metadata.year || 'Unknown');
 
-      // For TV shows, organize into series/season folder hierarchy
+      // For TV shows, check if already in correct folder structure
       cleanName = this.sanitizeFileName(cleanName);
       const ext = originalExtension.startsWith('.') ? originalExtension : `.${originalExtension}`;
       const seriesName = this.sanitizeFileName(cleanSeriesTitle);
       const seasonFolder = `Season ${metadata.season || 1}`;
       
+      // Check if file is already in the correct folder structure
+      let needsDirectoryCreation = false;
+      let shouldProvideSeriesFolder = null;
+      
+      if (originalPath) {
+        const pathParts = originalPath.split('/');
+        const currentFolderName = pathParts[pathParts.length - 2]; // Parent folder
+        const seasonPattern = /^Season\s+(\d+)$/i;
+        const isInSeasonFolder = seasonPattern.test(currentFolderName);
+        
+        if (!isInSeasonFolder) {
+          // File is not in a Season folder, suggest full series/season structure
+          needsDirectoryCreation = true;
+          shouldProvideSeriesFolder = seriesName;
+        } else {
+          // File is already in a Season folder, don't suggest folder reorganization
+          needsDirectoryCreation = false;
+          shouldProvideSeriesFolder = null;
+        }
+      } else {
+        // No path info, default to creating structure
+        needsDirectoryCreation = true;
+        shouldProvideSeriesFolder = seriesName;
+      }
+      
       return {
         filename: cleanName + ext,
-        needsDirectoryCreation: true,
+        needsDirectoryCreation: needsDirectoryCreation,
         seasonFolder: seasonFolder,
-        seriesFolder: seriesName,
+        seriesFolder: shouldProvideSeriesFolder,
         season: metadata.season || 1
       };
     }

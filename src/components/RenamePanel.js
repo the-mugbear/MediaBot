@@ -4,6 +4,7 @@ import metadataService from '../services/metadataService';
 import metadataWriter from '../services/metadataWriter';
 import settingsService from '../services/settingsService';
 import dependencyService from '../services/dependencyService';
+import { logger } from '../hooks/useLogger';
 
 const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
   const [format, setFormat] = useState('{n} - {s00e00} - {t}');
@@ -19,13 +20,16 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
 
   const loadApiKeys = async () => {
     try {
+      logger.info('Loading API keys for metadata services');
       const apiKeys = await settingsService.getApiKeys();
       if (apiKeys && Object.keys(apiKeys).length > 0) {
         metadataService.setApiKeys(apiKeys);
-        console.log('API keys loaded in RenamePanel');
+        logger.success('API keys loaded successfully', { keyCount: Object.keys(apiKeys).length });
+      } else {
+        logger.warn('No API keys found - metadata lookup may be limited');
       }
     } catch (error) {
-      console.error('Failed to load API keys:', error);
+      logger.error('Failed to load API keys', { error: error.message });
     }
   };
 
@@ -44,7 +48,10 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     if (!currentPendingMatch) return;
     
     const fileIndex = currentPendingMatch.fileIndex;
-    console.log(`User selected series for ${currentPendingMatch.fileName}:`, selectedMatch);
+    logger.metadata(`User selected series for ${currentPendingMatch.fileName}`, { 
+      selection: selectedMatch,
+      affectedEpisodes: currentPendingMatch.episodeCount 
+    });
     
     // The selected match is the series - now we need to apply this series to all related files
     // and fetch episode-specific details for each
@@ -252,95 +259,100 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
 
   const previewRename = async () => {
     if (selectedFilesList.length === 0) {
+      logger.warn('Preview rename attempted with no files selected');
       alert('Please select files to rename');
       return;
     }
 
+    logger.info(`Starting preview rename process for ${selectedFilesList.length} files`);
+
     // Check dependencies before processing
     const validation = await dependencyService.validateOperation(['ffmpeg']);
     if (!validation.valid) {
+      logger.error('Dependency validation failed for ffmpeg');
       return; // User was already prompted with installation instructions
     }
 
     setIsProcessing(true);
     
     try {
-      console.log('Starting metadata lookup for', selectedFilesList.length, 'files');
+      logger.info(`Beginning metadata lookup for ${selectedFilesList.length} files`, { 
+        format: format,
+        fileNames: selectedFilesList.map(f => f.name) 
+      });
       const previews = [];
 
       for (const file of selectedFilesList) {
-        console.log(`Processing file: ${file.name}`);
+        logger.file(`Processing file: ${file.name}`, { path: file.path });
         
         // Parse the filename to extract metadata
         const parsed = metadataService.parseFileName(file.name, file.path);
-        console.log(`Parsed metadata for ${file.name}:`, parsed);
+        logger.metadata(`Parsed metadata for ${file.name}`, parsed);
         
         // Send debug info to Electron console
         if (window.electronAPI && window.electronAPI.debugLog) {
           window.electronAPI.debugLog(`Parsing file: ${file.name}`, parsed);
         }
         
-        let metadata = null;
-        let lookupResult = null;
-
-        // Look up metadata based on file type
-        if (parsed.type === 'movie') {
-          lookupResult = await metadataService.searchMovie(parsed.title, parsed.year);
-        } else if (parsed.type === 'tv') {
-          lookupResult = await metadataService.searchTVShow(parsed.title, parsed.season, parsed.episode);
-        }
-
-        if (lookupResult && lookupResult.success) {
-          // Check if we have multiple matches that need user selection
-          if (lookupResult.matches && lookupResult.matches.length > 1) {
-            // Store multiple matches for user selection
-            const matchData = {
-              file,
-              parsed,
-              matches: lookupResult.matches,
-              fileIndex: previews.length
-            };
-            
-            // For now, use the best match but mark it for potential user review
-            metadata = { ...parsed, ...lookupResult.bestMatch };
-            metadata.hasMultipleMatches = true;
-            metadata.allMatches = lookupResult.matches;
-            console.log(`Found ${lookupResult.matches.length} matches for ${file.name}, using best match:`, metadata);
-          } else {
-            // Single match or best match
-            const selectedMatch = lookupResult.bestMatch || lookupResult.matches?.[0] || lookupResult;
-            metadata = { ...parsed, ...selectedMatch };
-            console.log(`Found single match:`, metadata);
-          }
+        // OPTIMIZATION: Use only parsed data for fast rename preview
+        // Metadata lookup should be a separate operation, not part of rename
+        const metadata = parsed;
+        
+        // Set confidence based on parsing quality
+        if (parsed.episodeTitle || parsed.movieTitle) {
+          metadata.confidence = 0.8; // High confidence for already formatted files
+        } else if (parsed.type !== 'unknown') {
+          metadata.confidence = 0.7; // Good confidence for recognized format
         } else {
-          // Fallback to parsed data
-          metadata = parsed;
-          
-          // If we have episode title or good parsing, increase confidence
-          if (parsed.episodeTitle || parsed.movieTitle) {
-            metadata.confidence = 0.8; // High confidence for already formatted files
-          } else if (parsed.type !== 'unknown') {
-            metadata.confidence = 0.6; // Medium confidence for recognized format
-          } else {
-            metadata.confidence = 0.3; // Low confidence for fallback
-          }
-          
-          console.log(`No metadata found, using parsed data:`, metadata);
+          metadata.confidence = 0.5; // Medium confidence for basic parsing
         }
+        
+        logger.info(`Using parsed data for fast rename preview: ${file.name}`, { 
+          type: metadata.type,
+          confidence: metadata.confidence 
+        });
 
         // Generate new filename and path information
         const fileExtension = file.name.split('.').pop();
         const filenameInfo = metadataService.generateFileName(metadata, format, `.${fileExtension}`, file.path);
         
-        console.log(`Generated filename info for ${file.name}:`, filenameInfo);
+        logger.file(`Generated filename for ${file.name}`, { 
+          original: file.name,
+          new: filenameInfo.filename,
+          format: format,
+          extension: fileExtension
+        });
         
-        // Determine parent folder changes
+        // Determine parent folder changes - but check if file is already in correct location
         const currentDirectory = file.path.substring(0, file.path.lastIndexOf('/'));
         const currentParentName = currentDirectory.split('/').pop();
         let parentFolderChange = null;
         
-        if (filenameInfo.seriesFolder) {
-          // Check if we're moving from a release folder to a clean series folder
+        // Check if file is already in a Season folder
+        const seasonPattern = /^Season\s+(\d+)$/i;
+        const isInSeasonFolder = seasonPattern.test(currentParentName);
+        
+        if (isInSeasonFolder && metadata.type === 'tv' && metadata.season) {
+          // File is in a Season folder - check if it's the correct season
+          const currentSeasonMatch = currentParentName.match(seasonPattern);
+          const currentSeasonNumber = currentSeasonMatch ? parseInt(currentSeasonMatch[1]) : null;
+          const targetSeasonNumber = metadata.season;
+          
+          if (currentSeasonNumber === targetSeasonNumber) {
+            // File is already in the correct Season folder - no parent folder change needed
+            logger.success(`File already in correct location - no folder change needed: ${file.name}`);
+            parentFolderChange = null;
+          } else {
+            // Wrong season folder
+            parentFolderChange = {
+              from: currentParentName,
+              to: `Season ${targetSeasonNumber}`,
+              type: 'season_correction',
+              isCleanup: false
+            };
+          }
+        } else if (filenameInfo.seriesFolder && !isInSeasonFolder) {
+          // File is NOT in a season folder, check if we need to move to series structure
           const isFromReleaseFolder = currentParentName.includes('.') || 
                                      currentParentName.includes('[') || 
                                      currentParentName.includes('S01') ||
@@ -367,29 +379,27 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           needsDirectoryCreation: filenameInfo.needsDirectoryCreation,
           season: filenameInfo.season,
           parentFolderChange: parentFolderChange,
-          matches: lookupResult && lookupResult.success ? [
+          matches: [
             { 
-              source: metadata.source || 'Unknown', 
+              source: 'Parsed', 
               title: metadata.title || 'Unknown', 
               year: metadata.year || 'Unknown',
               type: metadata.type || 'unknown'
             }
-          ] : []
+          ]
         });
       }
       
       setResults(previews);
-      console.log('Preview generation complete:', previews);
+      logger.success(`Fast preview generation complete: ${previews.length} files processed`, {
+        filesProcessed: previews.length,
+        averageConfidence: (previews.reduce((sum, p) => sum + p.confidence, 0) / previews.length * 100).toFixed(1) + '%',
+        processingMode: 'fast_parse_only'
+      });
       
-      // Check if any results have multiple matches that need user selection
-      const hasMultipleMatches = checkForMultipleMatches(previews);
-      if (hasMultipleMatches) {
-        console.log('Multiple matches found, showing match selector...');
-      } else {
-        console.log('No multiple matches found, preview ready for execution');
-      }
+      logger.success('Preview ready for execution - using parsed data only (fast mode)');
     } catch (error) {
-      console.error('Preview failed:', error);
+      logger.error('Preview generation failed', { error: error.message });
       alert('Failed to generate preview: ' + error.message);
     } finally {
       setIsProcessing(false);
@@ -467,7 +477,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           window.nodeAPI.path.join(currentDirectory, result.newName) :
           `${currentDirectory}/${result.newName}`;
         
-        console.log(`File already in correct Season ${targetSeasonNumber} folder, renaming in place`);
+        logger.debug(`File already in correct Season ${targetSeasonNumber} folder, renaming in place: ${result.newName}`);
         return newPath;
       }
     }
@@ -515,9 +525,12 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
 
   const executeRename = async () => {
     if (results.length === 0) {
+      logger.warn('Execute rename attempted without preview');
       alert('Please preview rename first');
       return;
     }
+
+    logger.info(`Starting rename execution for ${results.length} files`);
 
     // Load settings to check backup and metadata preferences
     let createBackup = false;
@@ -526,28 +539,32 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
       const preferences = await settingsService.getPreferences();
       createBackup = preferences?.createBackup === true;
       writeMetadata = preferences?.writeMetadata !== false; // Default to true unless explicitly disabled
-      console.log('Create backup setting:', createBackup);
-      console.log('Write metadata setting:', writeMetadata);
+      logger.info('Loaded user preferences', { createBackup, writeMetadata });
     } catch (error) {
-      console.warn('Failed to load settings:', error);
+      logger.warn('Failed to load user preferences, using defaults', { error: error.message });
     }
 
     // Confirm the rename operation
     const confirmMessage = `Are you sure you want to rename ${results.length} file(s)?\n\nThis will directly rename the files without creating backups.`;
     if (!window.confirm(confirmMessage)) {
+      logger.info('User cancelled rename operation');
       return;
     }
 
+    logger.info('User confirmed rename operation, beginning execution');
     setIsProcessing(true);
     
     try {
-      console.log('Executing rename for:', results.length, 'files');
-      console.log('Selected files:', selectedFilesList);
-      console.log('Results:', results);
-      console.log('nodeAPI available:', !!window.nodeAPI);
+      logger.debug('Rename execution details', {
+        resultsCount: results.length,
+        selectedFilesCount: selectedFilesList.length,
+        nodeAPIAvailable: !!window.nodeAPI,
+        electronAPIAvailable: !!window.electronAPI
+      });
       
       // Check if electronAPI is available
       if (!window.electronAPI || !window.electronAPI.organizeFiles) {
+        logger.error('Electron API not available for file operations');
         throw new Error('Electron API not available. Please restart the application.');
       }
       
@@ -751,7 +768,16 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
             onClick={previewRename}
             disabled={isProcessing || selectedFilesList.length === 0}
           >
-            {isProcessing ? 'Processing...' : 'Preview Rename'}
+            {isProcessing ? 'Processing...' : 'Preview Rename (Fast)'}
+          </button>
+          
+          <button 
+            className="btn btn-info" 
+            onClick={() => console.log('Metadata fetch feature coming soon')}
+            disabled={isProcessing || selectedFilesList.length === 0}
+            title="Fetch metadata from online databases (slower but more accurate)"
+          >
+            🌐 Fetch Metadata
           </button>
           
           <button 
