@@ -12,6 +12,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
   const [results, setResults] = useState([]);
   const [pendingMatches, setPendingMatches] = useState([]);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const [metadataCache, setMetadataCache] = useState(new Map());
 
   useEffect(() => {
     // Load API keys from settings when component mounts
@@ -42,6 +43,93 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
   ];
 
   const selectedFilesList = files.filter(file => selectedFiles.includes(file.id));
+
+  // Metadata caching methods
+  const cacheMetadata = (fileId, metadata) => {
+    setMetadataCache(prev => {
+      const newCache = new Map(prev);
+      newCache.set(fileId, {
+        metadata,
+        timestamp: Date.now(),
+        source: 'rename_preview'
+      });
+      logger.metadata(`Cached metadata for file ${fileId}`, { 
+        title: metadata.title, 
+        type: metadata.type,
+        cacheSize: newCache.size 
+      });
+      return newCache;
+    });
+  };
+
+  const getCachedMetadata = (fileId) => {
+    return metadataCache.get(fileId);
+  };
+
+  const clearMetadataCache = () => {
+    logger.metadata(`Clearing metadata cache (${metadataCache.size} entries)`);
+    setMetadataCache(new Map());
+  };
+
+  // Convert API metadata to FFmpeg-ready format
+  const createFFmpegMetadataMap = (metadata) => {
+    const metadataMap = {};
+
+    // Common metadata fields
+    if (metadata.title) {
+      metadataMap.title = metadata.title;
+    }
+
+    if (metadata.year) {
+      metadataMap.date = metadata.year.toString();
+      metadataMap.year = metadata.year.toString();
+    }
+
+    if (metadata.overview) {
+      const summary = `${metadata.overview} [Source: ${metadata.source || 'API'}] [Confidence: ${Math.round((metadata.confidence || 0) * 100)}%]`;
+      metadataMap.comment = summary;
+      metadataMap.description = metadata.overview;
+      metadataMap.synopsis = metadata.overview;
+    }
+
+    if (metadata.type === 'tv') {
+      // TV Show specific metadata
+      if (metadata.title) {
+        metadataMap.show = metadata.title;
+        metadataMap.series = metadata.title;
+      }
+
+      if (metadata.season) {
+        metadataMap.season_number = metadata.season.toString();
+        metadataMap.season = metadata.season.toString();
+      }
+
+      if (metadata.episode) {
+        metadataMap.episode_id = metadata.episode.toString();
+        metadataMap.episode_sort = metadata.episode.toString();
+        metadataMap.track = metadata.episode.toString();
+      }
+
+      if (metadata.episodeTitle) {
+        metadataMap.title = metadata.episodeTitle;
+        metadataMap.episode = metadata.episodeTitle;
+      }
+
+      // Set media type
+      metadataMap.media_type = '10'; // TV Show
+      metadataMap.genre = 'TV Show';
+
+    } else if (metadata.type === 'movie') {
+      // Movie specific metadata
+      metadataMap.media_type = '9'; // Movie
+      metadataMap.genre = 'Movie';
+    }
+
+    // Add source information
+    metadataMap.encoder = `MediaBot via ${metadata.source || 'API'}`;
+
+    return metadataMap;
+  };
 
   const handleMatchSelection = async (selectedMatch) => {
     const currentPendingMatch = pendingMatches[currentMatchIndex];
@@ -254,7 +342,9 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
   };
 
   const handleFormatChange = (e) => {
-    setFormat(e.target.value);
+    const newFormat = e.target.value;
+    logger.info(`User changed naming format: ${format} → ${newFormat}`);
+    setFormat(newFormat);
   };
 
   const previewRename = async () => {
@@ -294,23 +384,72 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           window.electronAPI.debugLog(`Parsing file: ${file.name}`, parsed);
         }
         
-        // OPTIMIZATION: Use only parsed data for fast rename preview
-        // Metadata lookup should be a separate operation, not part of rename
-        const metadata = parsed;
-        
-        // Set confidence based on parsing quality
-        if (parsed.episodeTitle || parsed.movieTitle) {
-          metadata.confidence = 0.8; // High confidence for already formatted files
-        } else if (parsed.type !== 'unknown') {
-          metadata.confidence = 0.7; // Good confidence for recognized format
+        // Fetch metadata for accurate renaming (but don't apply to files)
+        let metadata = null;
+        let lookupResult = null;
+
+        // Look up metadata based on file type for accurate renaming
+        if (parsed.type === 'movie') {
+          logger.api(`Searching for movie metadata: ${parsed.title}`, { year: parsed.year });
+          lookupResult = await metadataService.searchMovie(parsed.title, parsed.year);
+        } else if (parsed.type === 'tv') {
+          logger.api(`Searching for TV show metadata: ${parsed.title}`, { 
+            season: parsed.season, 
+            episode: parsed.episode 
+          });
+          lookupResult = await metadataService.searchTVShow(parsed.title, parsed.season, parsed.episode);
         } else {
-          metadata.confidence = 0.5; // Medium confidence for basic parsing
+          logger.debug(`Unknown media type for ${file.name}`, { parsedType: parsed.type });
         }
-        
-        logger.info(`Using parsed data for fast rename preview: ${file.name}`, { 
-          type: metadata.type,
-          confidence: metadata.confidence 
-        });
+
+        if (lookupResult && lookupResult.success) {
+          // Check if we have multiple matches that need user selection
+          if (lookupResult.matches && lookupResult.matches.length > 1) {
+            logger.metadata(`Found ${lookupResult.matches.length} matches for ${file.name}`, {
+              matches: lookupResult.matches.map(m => ({ title: m.title, year: m.year, source: m.source }))
+            });
+            
+            // Store multiple matches for user selection
+            const matchData = {
+              file,
+              parsed,
+              matches: lookupResult.matches,
+              fileIndex: previews.length
+            };
+            
+            // For now, use the best match but mark it for potential user review
+            metadata = { ...parsed, ...lookupResult.bestMatch };
+            metadata.hasMultipleMatches = true;
+            metadata.allMatches = lookupResult.matches;
+            logger.success(`Using best match for ${file.name}`, { bestMatch: lookupResult.bestMatch });
+          } else {
+            // Single match or best match
+            const selectedMatch = lookupResult.bestMatch || lookupResult.matches?.[0] || lookupResult;
+            metadata = { ...parsed, ...selectedMatch };
+            logger.success(`Found single match for ${file.name}`, { match: selectedMatch });
+          }
+          
+          // Cache the metadata for later use in Apply Metadata operation
+          cacheMetadata(file.id, metadata);
+          
+        } else {
+          // Fallback to parsed data
+          metadata = parsed;
+          
+          // Set confidence based on parsing quality
+          if (parsed.episodeTitle || parsed.movieTitle) {
+            metadata.confidence = 0.8; // High confidence for already formatted files
+          } else if (parsed.type !== 'unknown') {
+            metadata.confidence = 0.7; // Good confidence for recognized format
+          } else {
+            metadata.confidence = 0.5; // Medium confidence for basic parsing
+          }
+          
+          logger.warn(`No metadata found for ${file.name}, using parsed data`, { 
+            confidence: metadata.confidence,
+            fallbackReason: lookupResult ? 'API call failed' : 'Unknown media type'
+          });
+        }
 
         // Generate new filename and path information
         const fileExtension = file.name.split('.').pop();
@@ -532,20 +671,18 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
 
     logger.info(`Starting rename execution for ${results.length} files`);
 
-    // Load settings to check backup and metadata preferences
+    // Load settings to check backup preferences
     let createBackup = false;
-    let writeMetadata = true; // Default to true
     try {
       const preferences = await settingsService.getPreferences();
       createBackup = preferences?.createBackup === true;
-      writeMetadata = preferences?.writeMetadata !== false; // Default to true unless explicitly disabled
-      logger.info('Loaded user preferences', { createBackup, writeMetadata });
+      logger.info('Loaded user preferences', { createBackup });
     } catch (error) {
       logger.warn('Failed to load user preferences, using defaults', { error: error.message });
     }
 
     // Confirm the rename operation
-    const confirmMessage = `Are you sure you want to rename ${results.length} file(s)?\n\nThis will directly rename the files without creating backups.`;
+    const confirmMessage = `Are you sure you want to rename ${results.length} file(s)?\n\nThis will rename files and stage metadata for later application.`;
     if (!window.confirm(confirmMessage)) {
       logger.info('User cancelled rename operation');
       return;
@@ -625,10 +762,10 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         });
       });
       
-      // Prepare operations with metadata for the new efficient workflow
+      // Prepare operations - stage metadata but don't write to files during rename
       const organizeOperations = renameOperations.map(op => ({
         ...op,
-        metadata: writeMetadata ? results.find(r => r.id === op.id)?.metadata : null,
+        metadata: null, // Don't write metadata during rename
         cleanupSource: true
       }));
       
@@ -642,6 +779,29 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         // Check results and update file list
         const successful = organizeResult.results.filter(r => r.success);
         const failed = organizeResult.results.filter(r => !r.success);
+        
+        // Stage metadata for successfully renamed files for later application
+        logger.info('Staging metadata for renamed files');
+        let metadataStaged = 0;
+        for (const successfulRename of successful) {
+          const resultData = results.find(r => r.id === successfulRename.id);
+          if (resultData?.metadata && window.electronAPI.stageMetadata) {
+            try {
+              // Convert metadata to FFmpeg format
+              const ffmpegMetadata = createFFmpegMetadataMap(resultData.metadata);
+              const stageResult = await window.electronAPI.stageMetadata(successfulRename.newPath, ffmpegMetadata, {
+                confidence: resultData.confidence || 0.8,
+                source: 'rename_operation'
+              });
+              if (stageResult.success) {
+                metadataStaged++;
+                logger.metadata(`Staged metadata for ${successfulRename.newPath}`);
+              }
+            } catch (error) {
+              logger.warn(`Failed to stage metadata for ${successfulRename.newPath}`, { error: error.message });
+            }
+          }
+        }
         
         if (successful.length > 0) {
           // Metadata is now handled automatically in the organize workflow
@@ -674,9 +834,8 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         
         // Show results to user
         if (failed.length === 0) {
-          const metadataCount = organizeResult.summary.metadataWritten;
-          const metadataMsg = writeMetadata && metadataCount > 0 ? ` and wrote metadata to ${metadataCount} files` : '';
-          alert(`Successfully organized ${successful.length} file(s)${metadataMsg}!`);
+          const metadataMsg = metadataStaged > 0 ? ` and staged metadata for ${metadataStaged} files` : '';
+          alert(`Successfully renamed ${successful.length} file(s)${metadataMsg}!\n\nUse "Apply Metadata" from the Files menu to write metadata to files.`);
         } else {
           // Extract basename safely for error messages
           const failedMessages = failed.map(f => {
