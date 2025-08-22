@@ -8,6 +8,7 @@ import { logger } from '../hooks/useLogger';
 
 const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
   const [format, setFormat] = useState('{n} - {s00e00} - {t}');
+  const [customFormat, setCustomFormat] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [results, setResults] = useState([]);
   const [pendingMatches, setPendingMatches] = useState([]);
@@ -232,7 +233,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         // Regenerate filename with episode-specific metadata
         const fileExtension = result.originalName.split('.').pop();
         const file = selectedFilesList.find(f => f.id === result.id);
-        const filenameInfo = metadataService.generateFileName(episodeMetadata, format, `.${fileExtension}`, file?.path);
+        const filenameInfo = metadataService.generateFileName(episodeMetadata, getEffectiveFormat(), `.${fileExtension}`, file?.path);
         
         // Update the result
         updatedResults[fileIndex] = {
@@ -345,6 +346,22 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     const newFormat = e.target.value;
     logger.info(`User changed naming format: ${format} → ${newFormat}`);
     setFormat(newFormat);
+    
+    // If switching to custom, initialize with current format
+    if (newFormat === 'custom' && !customFormat) {
+      setCustomFormat(format);
+    }
+  };
+
+  const handleCustomFormatChange = (e) => {
+    const newCustomFormat = e.target.value;
+    setCustomFormat(newCustomFormat);
+    logger.info(`User updated custom format: ${newCustomFormat}`);
+  };
+
+  // Get the effective format to use for operations
+  const getEffectiveFormat = () => {
+    return format === 'custom' ? customFormat : format;
   };
 
   const previewRename = async () => {
@@ -453,7 +470,7 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
 
         // Generate new filename and path information
         const fileExtension = file.name.split('.').pop();
-        const filenameInfo = metadataService.generateFileName(metadata, format, `.${fileExtension}`, file.path);
+        const filenameInfo = metadataService.generateFileName(metadata, getEffectiveFormat(), `.${fileExtension}`, file.path);
         
         logger.file(`Generated filename for ${file.name}`, { 
           original: file.name,
@@ -463,13 +480,25 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         });
         
         // Determine parent folder changes - but check if file is already in correct location
-        const currentDirectory = file.path.substring(0, file.path.lastIndexOf('/'));
-        const currentParentName = currentDirectory.split('/').pop();
+        const currentDirectory = window.nodeAPI ? 
+          window.nodeAPI.path.dirname(file.path) : 
+          file.path.substring(0, file.path.lastIndexOf('/'));
+        const currentParentName = window.nodeAPI ? 
+          window.nodeAPI.path.basename(currentDirectory) : 
+          currentDirectory.split('/').pop();
         let parentFolderChange = null;
         
         // Check if file is already in a Season folder
         const seasonPattern = /^Season\s+(\d+)$/i;
         const isInSeasonFolder = seasonPattern.test(currentParentName);
+        
+        logger.debug(`Checking season folder for ${file.name}`, {
+          currentDirectory,
+          currentParentName,
+          isInSeasonFolder,
+          metadataType: metadata.type,
+          metadataSeason: metadata.season
+        });
         
         if (isInSeasonFolder && metadata.type === 'tv' && metadata.season) {
           // File is in a Season folder - check if it's the correct season
@@ -479,10 +508,14 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           
           if (currentSeasonNumber === targetSeasonNumber) {
             // File is already in the correct Season folder - no parent folder change needed
-            logger.success(`File already in correct location - no folder change needed: ${file.name}`);
+            logger.success(`File already in correct Season ${targetSeasonNumber} folder - no folder change needed: ${file.name}`);
             parentFolderChange = null;
           } else {
             // Wrong season folder
+            logger.info(`File in wrong season folder - needs correction: ${file.name}`, {
+              current: currentSeasonNumber,
+              target: targetSeasonNumber
+            });
             parentFolderChange = {
               from: currentParentName,
               to: `Season ${targetSeasonNumber}`,
@@ -530,13 +563,22 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
       }
       
       setResults(previews);
-      logger.success(`Fast preview generation complete: ${previews.length} files processed`, {
+      
+      // Check for multiple matches that need user selection
+      const hasMultipleMatches = checkForMultipleMatches(previews);
+      
+      logger.success(`Preview generation complete: ${previews.length} files processed`, {
         filesProcessed: previews.length,
         averageConfidence: (previews.reduce((sum, p) => sum + p.confidence, 0) / previews.length * 100).toFixed(1) + '%',
-        processingMode: 'fast_parse_only'
+        multipleMatchesFound: hasMultipleMatches,
+        processingMode: 'api_lookup_with_staging'
       });
       
-      logger.success('Preview ready for execution - using parsed data only (fast mode)');
+      if (hasMultipleMatches) {
+        logger.info('Multiple matches found - user selection required');
+      } else {
+        logger.success('Preview ready for execution');
+      }
     } catch (error) {
       logger.error('Preview generation failed', { error: error.message });
       alert('Failed to generate preview: ' + error.message);
@@ -605,6 +647,15 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
     const seasonPattern = /^Season\s+(\d+)$/i;
     const isInSeasonFolder = seasonPattern.test(currentFolderName);
     
+    logger.debug(`determineCorrectFilePath: Checking season folder detection`, {
+      fileName: file.name,
+      currentDirectory,
+      currentFolderName,
+      isInSeasonFolder,
+      targetSeason: result.metadata?.season,
+      metadataType: result.metadata?.type
+    });
+    
     if (isInSeasonFolder) {
       const currentSeasonMatch = currentFolderName.match(seasonPattern);
       const currentSeasonNumber = currentSeasonMatch ? parseInt(currentSeasonMatch[1]) : null;
@@ -616,7 +667,12 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           window.nodeAPI.path.join(currentDirectory, result.newName) :
           `${currentDirectory}/${result.newName}`;
         
-        logger.debug(`File already in correct Season ${targetSeasonNumber} folder, renaming in place: ${result.newName}`);
+        logger.success(`File already in correct Season ${targetSeasonNumber} folder, renaming in place`, {
+          fileName: result.newName,
+          currentPath: file.path,
+          newPath: newPath,
+          seasonFolder: currentFolderName
+        });
         return newPath;
       }
     }
@@ -720,7 +776,13 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
         // Determine the correct path for this file
         const newPath = determineCorrectFilePath(file, result);
         
-        console.log(`Mapping rename: ${file.path} -> ${newPath}`);
+        logger.debug(`Mapping rename operation`, {
+          fileId: result.id,
+          fileName: file.name,
+          oldPath: file.path,
+          newPath: newPath,
+          parentFolderChange: result.parentFolderChange
+        });
         
         // Check if source and destination are the same (no operation needed)
         // Normalize paths for cross-platform comparison
@@ -884,9 +946,10 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
           {format === 'custom' && (
             <input
               type="text"
+              value={customFormat}
               placeholder="Enter custom format (e.g., {n} - {s00e00} - {t})"
               className="custom-format-input"
-              onChange={(e) => setFormat(e.target.value)}
+              onChange={handleCustomFormatChange}
             />
           )}
           
@@ -1020,23 +1083,107 @@ const RenamePanel = ({ files, selectedFiles, onUpdateFiles }) => {
                     )}
                   </div>
                 </div>
-                <div className="result-confidence">
-                  Confidence: {(result.confidence * 100).toFixed(1)}%
-                </div>
-                <div className="result-matches">
-                  {result.matches.map((match, index) => (
-                    <span key={index} className="match-source">
-                      {match.source}: {match.title} ({match.year}) [{match.type}]
-                    </span>
-                  ))}
-                  {result.metadata && (
-                    <div className="parsed-info">
-                      Detected: {result.metadata.type} - "{result.metadata.title}"
-                      {result.metadata.year && ` (${result.metadata.year})`}
-                      {result.metadata.season && result.metadata.episode && 
-                        ` - S${result.metadata.season}E${result.metadata.episode}`}
+                <div className="result-metadata-section">
+                  <div className="confidence-display">
+                    <div className="confidence-bar-container">
+                      <div className="confidence-label">
+                        <span className="confidence-icon">
+                          {result.confidence >= 0.9 ? '🎯' : result.confidence >= 0.7 ? '👍' : result.confidence >= 0.5 ? '⚠️' : '❓'}
+                        </span>
+                        <span className="confidence-text">
+                          Confidence: {(result.confidence * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="confidence-bar">
+                        <div 
+                          className={`confidence-fill confidence-${result.confidence >= 0.8 ? 'high' : result.confidence >= 0.6 ? 'medium' : 'low'}`}
+                          style={{ width: `${result.confidence * 100}%` }}
+                        />
+                      </div>
                     </div>
-                  )}
+                    <div className="confidence-description">
+                      {result.confidence >= 0.9 ? 'Excellent match' : 
+                       result.confidence >= 0.7 ? 'Good match' : 
+                       result.confidence >= 0.5 ? 'Fair match' : 'Low confidence'}
+                    </div>
+                  </div>
+                  
+                  <div className="metadata-details">
+                    {result.metadata && (
+                      <div className="detected-info">
+                        <div className="metadata-header">
+                          <span className="metadata-icon">🎬</span>
+                          <span className="metadata-title">Detected Metadata</span>
+                        </div>
+                        <div className="metadata-grid">
+                          <div className="metadata-item">
+                            <span className="metadata-key">Type:</span>
+                            <span className="metadata-value">
+                              {result.metadata.type === 'tv' ? '📺 TV Show' : 
+                               result.metadata.type === 'movie' ? '🎥 Movie' : 
+                               '❓ Unknown'}
+                            </span>
+                          </div>
+                          <div className="metadata-item">
+                            <span className="metadata-key">Title:</span>
+                            <span className="metadata-value">"{result.metadata.title}"</span>
+                          </div>
+                          {result.metadata.year && (
+                            <div className="metadata-item">
+                              <span className="metadata-key">Year:</span>
+                              <span className="metadata-value">{result.metadata.year}</span>
+                            </div>
+                          )}
+                          {result.metadata.season && result.metadata.episode && (
+                            <div className="metadata-item">
+                              <span className="metadata-key">Episode:</span>
+                              <span className="metadata-value">S{result.metadata.season}E{result.metadata.episode}</span>
+                            </div>
+                          )}
+                          {result.metadata.episodeTitle && (
+                            <div className="metadata-item">
+                              <span className="metadata-key">Episode Title:</span>
+                              <span className="metadata-value">"{result.metadata.episodeTitle}"</span>
+                            </div>
+                          )}
+                          {result.metadata.source && (
+                            <div className="metadata-item">
+                              <span className="metadata-key">Source:</span>
+                              <span className="metadata-value source-badge">
+                                {result.metadata.source === 'TheMovieDB' ? '🎬 TMDB' :
+                                 result.metadata.source === 'TheTVDB' ? '📺 TVDB' :
+                                 result.metadata.source === 'OMDb' ? '🎭 OMDb' :
+                                 result.metadata.source}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    
+                    <div className="source-matches">
+                      <div className="matches-header">
+                        <span className="matches-icon">🔍</span>
+                        <span className="matches-title">Search Results</span>
+                      </div>
+                      <div className="matches-list">
+                        {result.matches.map((match, index) => (
+                          <div key={index} className="match-item">
+                            <span className="match-source-badge">
+                              {match.source === 'Parsed' ? '📝' : 
+                               match.source === 'TheMovieDB' ? '🎬' :
+                               match.source === 'TheTVDB' ? '📺' :
+                               match.source === 'OMDb' ? '🎭' : '🔍'}
+                              {match.source}
+                            </span>
+                            <span className="match-details">
+                              {match.title} ({match.year}) [{match.type}]
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             ))}

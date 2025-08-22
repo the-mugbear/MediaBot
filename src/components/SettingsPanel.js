@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { logger } from '../hooks/useLogger';
 
 const SettingsPanel = () => {
   const [settings, setSettings] = useState({

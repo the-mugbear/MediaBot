@@ -32,12 +32,12 @@ const useLogger = () => {
       data
     };
 
-    // Add to global store
-    globalLogs.unshift(newLog);
+    // Add to global store (newest at end)
+    globalLogs.push(newLog);
     
-    // Trim if too many logs
+    // Trim if too many logs (remove oldest)
     if (globalLogs.length > MAX_LOGS) {
-      globalLogs = globalLogs.slice(0, MAX_LOGS);
+      globalLogs = globalLogs.slice(-MAX_LOGS);
     }
 
     // Notify all listeners
@@ -123,10 +123,10 @@ export const logger = (() => {
       data
     };
 
-    globalLogs.unshift(newLog);
+    globalLogs.push(newLog);
     
     if (globalLogs.length > MAX_LOGS) {
-      globalLogs = globalLogs.slice(0, MAX_LOGS);
+      globalLogs = globalLogs.slice(-MAX_LOGS);
     }
 
     logListeners.forEach(listener => listener(globalLogs));

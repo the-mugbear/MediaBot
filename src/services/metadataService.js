@@ -11,20 +11,36 @@ class MetadataService {
 
   // Parse filename to extract movie/show information
   parseFileName(filename, fullPath) {
+    console.log(`🔍 Parsing filename: "${filename}"`);
+    
     // Remove file extension
     const nameWithoutExt = filename.replace(/\.[^/.]+$/, '');
+    console.log(`📝 Name without extension: "${nameWithoutExt}"`);
     
     // Check if this is a template filename that wasn't processed
+    // But first, try to extract info from the actual filename content before template variables
     if (nameWithoutExt.includes('{n}') || nameWithoutExt.includes('{s') || nameWithoutExt.includes('{t}')) {
-      // Try to extract info from the directory path instead
+      // Extract content before the template variables for parsing
+      const beforeTemplate = nameWithoutExt.split(/\s*-\s*\{[^}]+\}/)[0];
+      if (beforeTemplate && beforeTemplate.trim()) {
+        // Try to parse the content before the template
+        const cleanedName = beforeTemplate.trim();
+        console.log(`Found template variables, parsing content before templates: "${cleanedName}"`);
+        return this.parseFileName(cleanedName + '.mkv', fullPath);
+      }
+      
+      // Try to extract info from the directory path as fallback
       if (fullPath) {
         const pathParts = fullPath.split('/');
         const parentDir = pathParts[pathParts.length - 2]; // Get parent directory name
         if (parentDir) {
-          return this.parseFileName(parentDir + '.mkv'); // Recursively parse the directory name
+          console.log(`Using parent directory for parsing: "${parentDir}"`);
+          return this.parseFileName(parentDir + '.mkv', null); // Avoid infinite recursion
         }
       }
-      // Fallback if no path info available
+      
+      // Final fallback if no path info available
+      console.warn('Template variables found but no parseable content available');
       return {
         type: 'unknown',
         title: 'Unknown',

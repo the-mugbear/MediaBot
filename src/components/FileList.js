@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import FileListItem from './FileListItem';
 import BulkActions from './BulkActions';
-import ProgressDisplay from './ProgressDisplay';
 import FileOperations from './FileOperations';
 import InteractiveBulkMetadata from './InteractiveBulkMetadata';
 import apiMetadataService from '../services/apiMetadataService';
 import dependencyService from '../services/dependencyService';
+import { logger } from '../hooks/useLogger';
 
 const FileList = ({ 
   files, 
@@ -39,22 +39,37 @@ const FileList = ({
     setDragOver(false);
     
     const droppedFiles = Array.from(e.dataTransfer.files);
+    logger.file(`Files dropped via drag & drop: ${droppedFiles.length} files`, {
+      fileNames: droppedFiles.map(f => f.name),
+      totalSize: droppedFiles.reduce((sum, f) => sum + f.size, 0)
+    });
     onFileDrop(droppedFiles);
   };
 
   const handleFileSelect = (fileId) => {
+    const file = files.find(f => f.id === fileId);
     if (selectedFiles.includes(fileId)) {
+      logger.file(`File deselected: ${file?.name || 'unknown'}`, { 
+        fileId, 
+        newSelectionCount: selectedFiles.length - 1 
+      });
       onFileSelect(selectedFiles.filter(id => id !== fileId));
     } else {
+      logger.file(`File selected: ${file?.name || 'unknown'}`, { 
+        fileId, 
+        newSelectionCount: selectedFiles.length + 1 
+      });
       onFileSelect([...selectedFiles, fileId]);
     }
   };
 
   const selectAll = () => {
+    logger.file(`Select all files: ${files.length} files selected`);
     onFileSelect(files.map(file => file.id));
   };
 
   const deselectAll = () => {
+    logger.file(`Deselect all files: ${selectedFiles.length} files deselected`);
     onFileSelect([]);
   };
 
@@ -208,15 +223,22 @@ const FileList = ({
   };
 
   const handleBulkFetchMetadata = async () => {
+    logger.api('Starting bulk metadata fetch operation');
+    
     // Check dependencies first
     const validation = await dependencyService.validateOperation(['ffmpeg']);
     if (!validation.valid) {
+      logger.error('Dependency validation failed for bulk metadata fetch');
       return; // User was already prompted with installation instructions
     }
 
     // Check API configuration
     const apiConfig = await apiMetadataService.checkApiConfiguration();
     if (!apiConfig.configured) {
+      logger.error('API configuration not complete for metadata fetch', { 
+        configured: apiConfig.configured,
+        message: apiConfig.message 
+      });
       alert('Please configure API keys in Settings first.\n\n' + apiConfig.message);
       return;
     }
@@ -224,9 +246,14 @@ const FileList = ({
     const selectedFileObjects = files.filter(file => selectedFiles.includes(file.id));
     
     if (selectedFileObjects.length === 0) {
+      logger.warn('Bulk metadata fetch attempted with no files selected');
       alert('Please select files to fetch metadata for.');
       return;
     }
+
+    logger.info(`Bulk metadata fetch: ${selectedFileObjects.length} files selected`, {
+      fileNames: selectedFileObjects.map(f => f.name)
+    });
 
     const confirmMessage = `Start interactive metadata fetch for ${selectedFileObjects.length} selected files?\n\n` +
                           'This will:\n' +
@@ -237,9 +264,11 @@ const FileList = ({
                           'Continue?';
     
     if (!confirm(confirmMessage)) {
+      logger.info('User cancelled bulk metadata fetch operation');
       return;
     }
 
+    logger.success('User confirmed bulk metadata fetch, starting interactive process');
     setBulkFiles(selectedFileObjects);
     setShowInteractiveBulk(true);
   };
@@ -295,7 +324,6 @@ const FileList = ({
         />
       </div>
 
-      <ProgressDisplay progress={bulkProgress} />
 
       {showInteractiveBulk && (
         <InteractiveBulkMetadata

@@ -171,11 +171,28 @@ function App() {
     }
   };
 
+  const handleTabChange = (newTab) => {
+    logger.info(`Navigation: ${activeTab} → ${newTab}`);
+    setActiveTab(newTab);
+  };
+
   return (
     <DependencyChecker>
       <div className="app-container">
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
+        <Sidebar activeTab={activeTab} onTabChange={handleTabChange} />
         <main className="main-content">
+          <div className="content-header">
+            <button 
+              className="terminal-toggle-btn"
+              onClick={() => {
+                setIsTerminalVisible(!isTerminalVisible);
+                logger.info(`Terminal display ${!isTerminalVisible ? 'opened' : 'closed'}`);
+              }}
+              title="Toggle terminal display"
+            >
+              📟 Terminal {isTerminalVisible ? '▼' : '▶'}
+            </button>
+          </div>
           {renderContent()}
         </main>
         <Terminal 
